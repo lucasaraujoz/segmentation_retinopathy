@@ -4,3 +4,4 @@ outputs
 wandb
 *.pdf
 plans
+nohup*

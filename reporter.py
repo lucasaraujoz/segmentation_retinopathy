@@ -39,6 +39,7 @@ class Reporter:
                     config={
                         'exp_id': config.exp_id,
                         'exp_name': config.exp_name,
+                        'loss_type': config.loss_type,
                         'encoder': config.encoder_name,
                         'wavelet_family': config.wavelet_family,
                         'wavelet_level': config.wavelet_level,

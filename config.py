@@ -36,9 +36,14 @@ class Config:
     accumulation_steps: int = 8             # effective batch = batch_size * accumulation_steps = 4 * 8 = 32 (igual ao paper)
 
     # --- Loss ---
+    loss_type: str = 'dice_focal'          # 'dice_focal' | 'dice_focal_alpha' | 'focal_tversky'
     dice_weight: float = 0.5
     focal_weight: float = 0.5
     focal_gamma: float = 2.0
+    focal_alpha: float = 0.75              # class balance for loss_type='dice_focal_alpha' (replaces pos_weight)
+    tversky_alpha: float = 0.3             # false-positive weight (focal_tversky)
+    tversky_beta: float = 0.7              # false-negative weight; beta>alpha favors recall
+    tversky_gamma: float = 1.333           # focal exponent (Abraham & Khan 2019)
 
     # --- Split (5-fold CV + fixed test) ---
     n_folds: int = 5
@@ -79,6 +84,18 @@ EXPERIMENTS: dict[str, Config] = {
     # Baseline: standard UNet + EfficientNet-B4, no wavelet
     '00': Config(
         exp_id='00', exp_name='baseline',
+        wavelet_skip_indices=(),
+    ),
+
+    # Loss ablation (baseline architecture, no wavelet) — exp00 is the control
+    '10': Config(
+        exp_id='10', exp_name='dicefocal_alpha',
+        loss_type='dice_focal_alpha',
+        wavelet_skip_indices=(),
+    ),
+    '11': Config(
+        exp_id='11', exp_name='focal_tversky',
+        loss_type='focal_tversky',
         wavelet_skip_indices=(),
     ),
 
