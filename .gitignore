@@ -1,0 +1,6 @@
+__pycache__/
+inspiracao
+outputs
+wandb
+*.pdf
+plans
