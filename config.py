@@ -22,6 +22,7 @@ class Config:
     wavelet_family: str = 'haar'            # haar | db2 | db4 | sym4
     wavelet_level: int = 1                  # decomposition depth
     wavelet_skip_indices: Tuple[int, ...] = ()  # empty = baseline (no wavelet)
+    wavelet_include_ll: bool = False        # also inject the final approximation (LL) band, not only details
 
     # --- Training ---
     batch_size: int = 4                     # EfficientNet-B4 @ 512x512 needs ~3GB/sample
@@ -97,6 +98,34 @@ EXPERIMENTS: dict[str, Config] = {
         exp_id='11', exp_name='focal_tversky',
         loss_type='focal_tversky',
         wavelet_skip_indices=(),
+    ),
+
+    # ── Hemorrhage-only testbed (binary: 0 background, 1 Hemorrhage) ──────────
+    # Isolates the wavelet's effect. Evidence (wavelet_haar_multilevel.ipynb):
+    # hemorrhage signal lives in the LL (approximation), which the detail-only
+    # WaveletSkipConnection discards — so H2 (with LL) is the real hypothesis test.
+    # Reference: user baseline HEM Dice 0.603; FGADR paper U-Net 0.570, DenseU-Net 0.617.
+    'H0': Config(
+        exp_id='H0', exp_name='hem_baseline',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_skip_indices=(),
+    ),
+    'H1': Config(
+        exp_id='H1', exp_name='hem_haar_detail',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1),
+        wavelet_include_ll=False,
+    ),
+    'H2': Config(
+        exp_id='H2', exp_name='hem_haar_ll',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1),
+        wavelet_include_ll=True,
     ),
 
     # Wavelet families — first skip only, level 1

@@ -14,8 +14,13 @@ Architecture per skip connection:
     ↓ Upsample all detail maps to original H×W
     ↓ Concat: [skip, LH_1, HL_1, HH_1, ..., LH_L, HL_L, HH_L]
                   C + 3×C×level channels
+    ↓ (optional, include_ll) also concat the final approximation LL_L upsampled → +C channels
     ↓ Conv1×1 → C channels + BN + ReLU
   Output [B, C, H, W]  (same shape as input — decoder sees unchanged size)
+
+The LL (approximation) is normally discarded (only feeds the next level). For lesions whose
+signal is low-frequency — e.g. hemorrhages, which are dark diffuse blobs separable in the LL band,
+not the edge/detail bands — set include_ll=True to also feed the approximation to the decoder.
 """
 
 import pywt
@@ -55,10 +60,12 @@ class WaveletSkipConnection(nn.Module):
         level:         Number of DWT decomposition levels (1, 2, or 3).
     """
 
-    def __init__(self, in_channels: int, wavelet: str = 'haar', level: int = 1):
+    def __init__(self, in_channels: int, wavelet: str = 'haar', level: int = 1,
+                 include_ll: bool = False):
         super().__init__()
         self.level = level
         self.in_channels = in_channels
+        self.include_ll = include_ll
 
         filters = _build_2d_filters(wavelet)  # [4, 1, L, L]
         self.register_buffer('filters', filters)
@@ -68,8 +75,8 @@ class WaveletSkipConnection(nn.Module):
         self.pad = (L - 2) // 2
 
         # Channel reduction after concatenation
-        # Input: C (skip) + 3*C*level (detail subbands) = C*(1 + 3*level)
-        total_in = in_channels * (1 + 3 * level)
+        # Input: C (skip) + 3*C*level (detail subbands) [+ C (final LL) if include_ll]
+        total_in = in_channels * (1 + 3 * level) + (in_channels if include_ll else 0)
         self.reduce = nn.Sequential(
             nn.Conv2d(total_in, in_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(in_channels),
@@ -103,5 +110,11 @@ class WaveletSkipConnection(nn.Module):
                 parts.append(
                     F.interpolate(detail, size=(H, W), mode='bilinear', align_corners=False)
                 )
+
+        if self.include_ll:
+            # Also feed the final approximation (low-frequency) band to the decoder.
+            parts.append(
+                F.interpolate(approx, size=(H, W), mode='bilinear', align_corners=False)
+            )
 
         return self.reduce(torch.cat(parts, dim=1))

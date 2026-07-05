@@ -32,6 +32,7 @@ class WaveletUnet(nn.Module):
         wavelet_skip_indices: tuple,
         wavelet_family: str,
         wavelet_level: int,
+        wavelet_include_ll: bool = False,
     ):
         super().__init__()
         self.encoder = base.encoder
@@ -48,7 +49,9 @@ class WaveletUnet(nn.Module):
             feat_idx = skip_idx + 1    # features[0] is raw input, skip[0] = features[1]
             in_ch = features[feat_idx].shape[1]
             key = str(skip_idx)
-            self.wavelet_modules[key] = WaveletSkipConnection(in_ch, wavelet_family, wavelet_level)
+            self.wavelet_modules[key] = WaveletSkipConnection(
+                in_ch, wavelet_family, wavelet_level, include_ll=wavelet_include_ll
+            )
 
         self.wavelet_skip_indices = wavelet_skip_indices
 
@@ -84,4 +87,5 @@ def build_model(config: Config) -> nn.Module:
         wavelet_skip_indices=config.wavelet_skip_indices,
         wavelet_family=config.wavelet_family,
         wavelet_level=config.wavelet_level,
+        wavelet_include_ll=config.wavelet_include_ll,
     )
