@@ -1,5 +1,7 @@
 import cv2
 import json
+import time
+import warnings
 import numpy as np
 import pandas as pd
 import torch
@@ -42,21 +44,49 @@ class FGADRDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx):
+        # A transient PNG read failure (libpng CRC / truncated read under heavy I/O)
+        # must NOT kill a multi-hour run. Retry the sample, then fall back to a
+        # neighbour so the epoch keeps going; only give up if many in a row fail.
+        for attempt in range(5):
+            try:
+                return self._get_sample(idx)
+            except (RuntimeError, cv2.error) as e:
+                warnings.warn(
+                    f'[dataset] sample {idx} ({self.df.iloc[idx]["filename"]}) failed: {e}; '
+                    f'retry/fallback {attempt + 1}/5'
+                )
+                time.sleep(0.2)
+                idx = (idx + 1) % len(self.df)
+        raise RuntimeError(f'Could not load any sample after 5 attempts (started near idx {idx})')
+
+    def _get_sample(self, idx):
         row = self.df.iloc[idx]
         fname = row['filename']
 
         img  = self._load_image(fname)    # [H, W, 3] uint8
-        mask = self._load_mask(fname, img.shape[:2])  # [H, W, 2] uint8
+        mask = self._load_mask(fname, img.shape[:2])  # [H, W, C] uint8
 
         augmented = self.transform(image=img, mask=mask)
         image_t = augmented['image']                           # [3, H, W] float32
-        mask_t  = augmented['mask'].permute(2, 0, 1).float()  # [2, H, W]
+        mask_t  = augmented['mask'].permute(2, 0, 1).float()  # [C, H, W]
 
         return {'image': image_t, 'mask': mask_t, 'filename': fname}
 
+    @staticmethod
+    def _imread_retry(path: Path, flags: int = cv2.IMREAD_COLOR, tries: int = 3) -> np.ndarray:
+        # cv2.imread returns None on a truncated/CRC-failed PNG read (can happen
+        # transiently under heavy I/O). Retry with a short backoff before giving up
+        # so a single glitchy read doesn't crash a whole epoch.
+        for attempt in range(tries):
+            img = cv2.imread(str(path), flags)
+            if img is not None:
+                return img
+            time.sleep(0.2 * (attempt + 1))
+        raise RuntimeError(f'Failed to read after {tries} retries: {path}')
+
     def _load_image(self, fname: str) -> np.ndarray:
         path = self.fgadr / 'Original_Images' / fname
-        img = cv2.imread(str(path))
+        img = self._imread_retry(path, cv2.IMREAD_COLOR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         if self.config.apply_clahe:
             img = self._apply_clahe(img)
@@ -76,7 +106,7 @@ class FGADRDataset(Dataset):
         for cls in self.config.classes:
             mask_path = self.fgadr / _MASK_DIRS[cls] / fname
             if mask_path.exists():
-                m = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                m = self._imread_retry(mask_path, cv2.IMREAD_GRAYSCALE)
                 channels.append((m > self.config.bin_threshold).astype(np.uint8))
             else:
                 channels.append(np.zeros((H0, W0), dtype=np.uint8))

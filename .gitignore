@@ -1,7 +1,9 @@
 __pycache__/
 inspiracao
-outputs
 wandb
 *.pdf
 plans
 nohup*
+exp_*
+mask_quality
+mask_review
