@@ -4,6 +4,7 @@ import time
 import warnings
 import numpy as np
 import pandas as pd
+import pywt
 import torch
 from pathlib import Path
 from torch.utils.data import Dataset
@@ -70,6 +71,9 @@ class FGADRDataset(Dataset):
         image_t = augmented['image']                           # [3, H, W] float32
         mask_t  = augmented['mask'].permute(2, 0, 1).float()  # [C, H, W]
 
+        if self.config.input_preproc == 'wavelet_channels':
+            image_t = self._append_wavelet_channels(image_t)   # [3,H,W] -> [6,H,W]
+
         return {'image': image_t, 'mask': mask_t, 'filename': fname}
 
     @staticmethod
@@ -90,6 +94,8 @@ class FGADRDataset(Dataset):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         if self.config.apply_clahe:
             img = self._apply_clahe(img)
+        if self.config.input_preproc == 'wavelet_illumnorm':
+            img = self._wavelet_illumnorm(img)
         return img
 
     def _apply_clahe(self, img: np.ndarray) -> np.ndarray:
@@ -97,6 +103,51 @@ class FGADRDataset(Dataset):
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         lab[:, :, 0] = clahe.apply(lab[:, :, 0])
         return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+    # ── Wavelet input preprocessing ───────────────────────────────────────────
+
+    @staticmethod
+    def _haar_lowfreq(chan: np.ndarray, level: int) -> np.ndarray:
+        """Coarse low-frequency (Haar LL) of a 2D channel, upsampled back to its size."""
+        coeffs = pywt.wavedec2(chan, 'haar', level=level, mode='periodization')
+        ll = coeffs[0]
+        return cv2.resize(ll, (chan.shape[1], chan.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    def _wavelet_illumnorm(self, img: np.ndarray) -> np.ndarray:
+        """Flatten uneven illumination: divide each channel by its coarse Haar-LL background.
+        Keeps 3 channels, uint8. Makes dark diffuse lesions (hemorrhage) more consistent."""
+        out = np.empty(img.shape, dtype=np.float32)
+        for c in range(3):
+            chan = img[:, :, c].astype(np.float32)
+            bg = self._haar_lowfreq(chan, level=5)          # slow illumination component
+            out[:, :, c] = chan / (bg + 1e-3) * float(bg.mean())
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    def _append_wavelet_channels(self, image_t: torch.Tensor) -> torch.Tensor:
+        """Append [LL, detail-magnitude, illumnorm] of the (augmented) green channel → 6ch.
+        Computed post-transform so geometry matches the mask; each map z-scored per image."""
+        # de-normalize green back to ~[0,1] so divisions are stable (ImageNet g: mean .456, std .224)
+        g = (image_t[1] * 0.224 + 0.456).clamp(0, 1).numpy().astype(np.float32)
+        H, W = g.shape
+
+        c = pywt.wavedec2(g, 'haar', level=2, mode='periodization')
+        ll = pywt.waverec2([c[0]] + [tuple(np.zeros_like(d) for d in det) for det in c[1:]],
+                           'haar', mode='periodization')[:H, :W]          # low-freq (full res)
+
+        c1 = pywt.wavedec2(g, 'haar', level=1, mode='periodization')
+        cH, cV, cD = c1[1]
+        detail = cv2.resize(np.abs(cH) + np.abs(cV) + np.abs(cD), (W, H))  # high-freq magnitude
+
+        bg = self._haar_lowfreq(g, level=4)
+        illum = g / (bg + 1e-3)                                            # illumination-normalized
+
+        maps = []
+        for m in (ll, detail, illum):
+            m = (m - m.mean()) / (m.std() + 1e-6)                          # z-score per image
+            m = np.clip(m, -5.0, 5.0)                                      # tame border spikes (bg≈0)
+            maps.append(torch.from_numpy(m.astype(np.float32)))
+        extra = torch.stack(maps, dim=0)                                  # [3, H, W]
+        return torch.cat([image_t, extra], dim=0)                        # [6, H, W]
 
     def _load_mask(self, fname: str, img_shape: tuple) -> np.ndarray:
         # Load masks at original resolution — albumentations Resize handles

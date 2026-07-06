@@ -13,6 +13,11 @@ class Config:
     classes: Tuple[str, ...] = ('HardExudate', 'Hemorrhage')
     bin_threshold: int = 127
     apply_clahe: bool = False
+    # Wavelet-based input preprocessing (applied to the image BEFORE the encoder):
+    #   'none'              — raw RGB
+    #   'wavelet_illumnorm' — divide by coarse Haar-LL background (flatten illumination), stays 3ch
+    #   'wavelet_channels'  — append [LL, detail-mag, illumnorm] of the green channel → 6ch input
+    input_preproc: str = 'none'
     allowed_suffixes: Optional[Tuple[str, ...]] = None        # None = all (_1, _2, _3)
 
     # --- Model ---
@@ -71,6 +76,11 @@ class Config:
         return len(self.classes)
 
     @property
+    def in_channels(self) -> int:
+        """Model input channels: 6 when appending wavelet maps, else 3 (RGB)."""
+        return 6 if self.input_preproc == 'wavelet_channels' else 3
+
+    @property
     def exp_dir(self) -> Path:
         return Path(self.output_dir) / f'exp_{self.exp_id}_{self.exp_name}'
 
@@ -126,6 +136,22 @@ EXPERIMENTS: dict[str, Config] = {
         wavelet_family='haar', wavelet_level=1,
         wavelet_skip_indices=(0, 1),
         wavelet_include_ll=True,
+    ),
+
+    # ── Wavelet as INPUT preprocessing (before the encoder), hemorrhage-only ──
+    # Feature-map wavelet (H1/H2) was ~null; pixel-level evidence for LL/hemorrhage
+    # is strong, so apply the wavelet on the raw image instead. Compare vs H0.
+    'H3': Config(
+        exp_id='H3', exp_name='hem_illumnorm',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        input_preproc='wavelet_illumnorm',   # divide by coarse Haar-LL background (3ch)
+    ),
+    'H4': Config(
+        exp_id='H4', exp_name='hem_wavelet_channels',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        input_preproc='wavelet_channels',    # RGB + [LL, detail, illumnorm] of green (6ch)
     ),
 
     # Wavelet families — first skip only, level 1

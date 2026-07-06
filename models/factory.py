@@ -74,7 +74,7 @@ def build_model(config: Config) -> nn.Module:
     base = smp.Unet(
         encoder_name=config.encoder_name,
         encoder_weights=config.encoder_weights,
-        in_channels=3,
+        in_channels=config.in_channels,   # 6 when input_preproc='wavelet_channels', else 3
         classes=config.out_channels,
         activation=None,       # raw logits
     )
