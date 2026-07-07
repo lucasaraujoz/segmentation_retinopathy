@@ -110,7 +110,10 @@ def _freeze_encoder_bn(model: torch.nn.Module):
 
 def train_epoch(model, loader, criterion, optimizer, scheduler, device, accumulation_steps, config):
     model.train()
-    _freeze_encoder_bn(model)
+    # Freezing encoder BN only helps when it holds pretrained running stats. Training
+    # from scratch (encoder_weights=None) needs BN to LEARN — freezing random stats breaks it.
+    if config.encoder_weights is not None:
+        _freeze_encoder_bn(model)
     total_loss = 0.0
     all_metrics = []
     optimizer.zero_grad()

@@ -22,7 +22,7 @@ class Config:
 
     # --- Model ---
     encoder_name: str = 'efficientnet-b4'
-    encoder_weights: str = 'imagenet'
+    encoder_weights: Optional[str] = 'imagenet'   # None = train encoder from scratch (random init)
     # Wavelet configuration
     wavelet_family: str = 'haar'            # haar | db2 | db4 | sym4
     wavelet_level: int = 1                  # decomposition depth
@@ -152,6 +152,54 @@ EXPERIMENTS: dict[str, Config] = {
         classes=('Hemorrhage',),
         loss_type='dice_focal_alpha',
         input_preproc='wavelet_channels',    # RGB + [LL, detail, illumnorm] of green (6ch)
+    ),
+
+    # ── Level sweep on H2 (LL in features), hemorrhage-only ──────────────────
+    # Only wavelet_level changes; skips=(0,1) + include_ll fixed, so any effect is
+    # attributable to depth. Ceiling 3 (deeper → feature maps too small). Note: extra
+    # levels mostly add DETAIL bands, which hemorrhage barely uses → modest expectation.
+    'H2L2': Config(
+        exp_id='H2L2', exp_name='hem_haar_ll_L2',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=2,
+        wavelet_skip_indices=(0, 1),
+        wavelet_include_ll=True,
+    ),
+    'H2L3': Config(
+        exp_id='H2L3', exp_name='hem_haar_ll_L3',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=3,
+        wavelet_skip_indices=(0, 1),
+        wavelet_include_ll=True,
+    ),
+
+    # ── Wavelet WITHOUT pretraining, hemorrhage-only ─────────────────────────
+    # Pretrained arms (H0-H4) all tied → hypothesis: ImageNet already supplies the
+    # low-freq/edge prior wavelet would give. From scratch the prior may matter:
+    # expect gap(S2-S0) > 0 while gap(H2-H0) ≈ 0. Compare the GAP, not absolute Dice.
+    'S0': Config(
+        exp_id='S0', exp_name='hem_scratch_baseline',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        encoder_weights=None,                # random init
+    ),
+    'S2': Config(
+        exp_id='S2', exp_name='hem_scratch_haar_ll',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        encoder_weights=None,
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1),
+        wavelet_include_ll=True,
+    ),
+    'S4': Config(
+        exp_id='S4', exp_name='hem_scratch_channels',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        encoder_weights=None,
+        input_preproc='wavelet_channels',
     ),
 
     # Wavelet families — first skip only, level 1
