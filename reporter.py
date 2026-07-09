@@ -36,6 +36,8 @@ class Reporter:
                 wandb.init(
                     project=config.wandb_project,
                     name=run_name,
+                    group=f'exp{config.exp_id}_{config.exp_name}',
+                    job_type=(f'fold{fold}' if fold is not None else 'test'),
                     config={
                         'exp_id': config.exp_id,
                         'exp_name': config.exp_name,
@@ -126,7 +128,25 @@ class Reporter:
             json.dump(results, f, indent=2)
         print(f'Test results saved → {path}')
         if self._wandb_active:
-            wandb.log({'test/' + k: v for k, v in results.items()})
+            scalars = {f'test/{k}': v for k, v in results.items()
+                       if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            wandb.log(scalars)
+
+    def log_froc(self, froc_out: dict[str, list[dict]]):
+        """Log one FROC custom chart per class (sensitivity vs FP/image)."""
+        if not self._wandb_active:
+            return
+        charts = {}
+        for cname, points in froc_out.items():
+            table = wandb.Table(
+                columns=['fp_per_image', 'sensitivity', 'threshold'],
+                data=[[p['fp_per_image'], p['sensitivity'], p['threshold']] for p in points],
+            )
+            charts[f'test/froc_{cname}'] = wandb.plot.line(
+                table, x='fp_per_image', y='sensitivity',
+                title=f'FROC {cname} — exp{self.config.exp_id}',
+            )
+        wandb.log(charts)
 
     def finish(self):
         if self._wandb_active:

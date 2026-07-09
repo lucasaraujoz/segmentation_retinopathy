@@ -460,6 +460,7 @@ def main():
     }
     reporter_final = Reporter(config, fold=None)
     reporter_final.save_test_results(final)
+    reporter_final.log_froc(froc_out)
     reporter_final.finish()
 
 

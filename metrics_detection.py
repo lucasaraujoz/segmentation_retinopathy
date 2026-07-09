@@ -34,15 +34,15 @@ def label_lesions(mask: np.ndarray, connectivity: int = 8, min_area: int = 10):
     labels, n = ndimage.label(mask > 0, structure=struct)
     if n == 0:
         return labels, 0
-    # drop tiny components
-    keep = np.ones(n + 1, dtype=bool)
-    keep[0] = False
-    for lab in range(1, n + 1):
-        if (labels == lab).sum() < min_area:
-            keep[lab] = False
+    # drop tiny components — vectorised area count in one pass (bincount over all
+    # labels) instead of an O(n_labels × H × W) per-label scan, which explodes when
+    # a low FROC threshold (e.g. 0.1) fragments a noisy prob map into 1000s of comps.
+    counts = np.bincount(labels.ravel(), minlength=n + 1)
+    keep = counts >= min_area
+    keep[0] = False                          # background
     # renumber kept labels to 1..k
     remap = np.zeros(n + 1, dtype=np.int32)
-    remap[keep] = np.arange(1, keep.sum() + 1)
+    remap[keep] = np.arange(1, int(keep.sum()) + 1)
     return remap[labels], int(keep.sum())
 
 
@@ -71,7 +71,8 @@ def _hd95(pred_bin: np.ndarray, gt_bin: np.ndarray) -> float:
 
 def lesion_wise_stats(pred_bin: np.ndarray, gt_bin: np.ndarray,
                       dil_factor: int = 2, connectivity: int = 8,
-                      min_area: int = 10, hd95_penalty: float | None = None) -> dict:
+                      min_area: int = 10, hd95_penalty: float | None = None,
+                      compute_hd95: bool = True) -> dict:
     """BraTS-style lesion-wise detection for one image.
 
     A GT lesion is a TP if ≥1 predicted component overlaps its *dilated* region;
@@ -106,7 +107,9 @@ def lesion_wise_stats(pred_bin: np.ndarray, gt_bin: np.ndarray,
             pred_union = np.isin(pred_lab, overlapping)
             per_lesion_hit.append(1)
             per_lesion_dice.append(_dice(gt_lesion, pred_union))
-            per_lesion_hd95.append(_hd95(pred_union, gt_lesion))
+            # HD95 (cKDTree) is skipped in the FROC sweep, which only needs tp/fn/fp;
+            # nan keeps the list aligned with GT lesions without paying the cost.
+            per_lesion_hd95.append(_hd95(pred_union, gt_lesion) if compute_hd95 else np.nan)
         else:
             per_lesion_hit.append(0)              # FN
             per_lesion_dice.append(0.0)
@@ -147,7 +150,8 @@ def froc_points(prob_map: np.ndarray, gt_bin: np.ndarray,
     """
     out = []
     for t in thresholds:
-        s = lesion_wise_stats(prob_map >= t, gt_bin, dil_factor, connectivity, min_area)
+        s = lesion_wise_stats(prob_map >= t, gt_bin, dil_factor, connectivity, min_area,
+                              compute_hd95=False)
         out.append({'threshold': float(t),
                     'tp': s['tp'], 'fn': s['fn'], 'fp': s['fp'],
                     'sensitivity': s['sensitivity']})
