@@ -71,6 +71,7 @@ from config import Config, EXPERIMENTS
 from dataset import build_dataset, load_dataframe, create_splits, filter_by_suffix
 from losses import build_loss
 from metrics import compute_batch_metrics, compute_hd95_epoch
+from metrics_detection import evaluate_class
 from models import build_model
 from reporter import Reporter
 
@@ -293,6 +294,9 @@ def main():
                         help='Disable test-time augmentation (faster, for smoke tests)')
     parser.add_argument('--no-hd95', action='store_true',
                         help='Skip Hausdorff95 in test evaluation (faster, for smoke tests)')
+    parser.add_argument('--eval-only', action='store_true',
+                        help='Skip training; load existing model_best_fold*.pth and only run test eval '
+                             '(computes pixel + lesion-wise detection metrics into test_results.json).')
     args = parser.parse_args()
 
     if args.exp not in EXPERIMENTS:
@@ -315,7 +319,7 @@ def main():
     # Overwrite guard — abort if experiment already has outputs
     exp_dir = config.exp_dir
     existing = list(exp_dir.glob('*.pth')) + list(exp_dir.glob('metrics*.csv'))
-    if existing and not args.overwrite:
+    if existing and not args.overwrite and not args.eval_only:
         print(f'\n[ERRO] Experimento {config.exp_id} já tem resultados em {exp_dir}/')
         print(f'       {len(existing)} arquivo(s): {[f.name for f in existing[:5]]}')
         print(f'       Use --overwrite para sobrescrever.')
@@ -344,18 +348,29 @@ def main():
     n_folds = args.folds or config.n_folds
     fold_results = []
 
-    for fold_idx, fold in enumerate(splits['folds'][:n_folds]):
-        tv_reset = trainval_df.reset_index(drop=True)
-        train_df = tv_reset.iloc[fold['train']]
-        val_df   = tv_reset.iloc[fold['val']]
+    if args.eval_only:
+        # Score already-trained checkpoints without retraining (replaces dump_preds.py)
+        ckpts = sorted(config.exp_dir.glob('model_best_fold*.pth'))
+        if not ckpts:
+            print(f'[ERRO] --eval-only mas não há model_best_fold*.pth em {config.exp_dir}/')
+            sys.exit(1)
+        fold_results = [{'fold': i, 'best_val_dice': float('nan'),
+                         'best_epoch': -1, 'checkpoint': str(c)} for i, c in enumerate(ckpts)]
+        n_folds = len(ckpts)
+        print(f'\n[eval-only] pontuando {n_folds} checkpoint(s) existente(s), sem treinar.')
+    else:
+        for fold_idx, fold in enumerate(splits['folds'][:n_folds]):
+            tv_reset = trainval_df.reset_index(drop=True)
+            train_df = tv_reset.iloc[fold['train']]
+            val_df   = tv_reset.iloc[fold['val']]
 
-        best_dice, best_epoch, ckpt_path = train_fold(
-            config, fold_idx, train_df, val_df, device
-        )
-        fold_results.append({
-            'fold': fold_idx, 'best_val_dice': best_dice,
-            'best_epoch': best_epoch, 'checkpoint': ckpt_path,
-        })
+            best_dice, best_epoch, ckpt_path = train_fold(
+                config, fold_idx, train_df, val_df, device
+            )
+            fold_results.append({
+                'fold': fold_idx, 'best_val_dice': best_dice,
+                'best_epoch': best_epoch, 'checkpoint': ckpt_path,
+            })
 
     # ── Test evaluation ────────────────────────────────────────────────────
     tta_label = '+TTA' if use_tta else 'no-TTA'
@@ -371,7 +386,7 @@ def main():
                              multiprocessing_context='spawn' if nw > 0 else None)
 
     # Ensemble: average logits from each fold's best checkpoint
-    all_preds, all_targets_list = None, []
+    all_preds, all_targets_list, all_files = None, [], []
     for res in fold_results:
         model = build_model(config).to(device)
         ckpt  = torch.load(res['checkpoint'], map_location=device, weights_only=False)
@@ -387,6 +402,7 @@ def main():
                 fold_preds.append(preds)
                 if len(all_targets_list) < len(test_loader):
                     all_targets_list.append(masks)
+                    all_files.extend(batch['filename'])
 
         if all_preds is None:
             all_preds = fold_preds
@@ -403,9 +419,29 @@ def main():
         hd = compute_hd95_epoch(all_preds, all_targets_list, config.classes)
         test_metrics.update(hd)
 
-    # CV summary
-    cv_dice = np.mean([r['best_val_dice'] for r in fold_results])
-    cv_std  = np.std([r['best_val_dice'] for r in fold_results])
+    # ── Lesion-wise detection metrics + FROC (per class) ────────────────────
+    # Runs on the ensembled probabilities; also saves a per-image sidecar for the
+    # paired stats (McNemar/Wilcoxon) in compare_experiments.py.
+    probs_np = torch.sigmoid(torch.cat(all_preds, dim=0)).numpy()      # [N, C, H, W]
+    gts_np   = torch.cat(all_targets_list, dim=0).numpy().astype(np.uint8)
+    froc_out = {}
+    scores = {'files': np.array(all_files, dtype=object)}
+    for ci, cname in enumerate(config.classes):
+        ev = evaluate_class(probs_np[:, ci], gts_np[:, ci])
+        test_metrics[f'lesion_dice_{cname}']  = ev['lesion_dice']
+        test_metrics[f'lesion_hd95_{cname}']  = ev['lesion_hd95']
+        test_metrics[f'sensitivity_{cname}']  = ev['sensitivity']
+        test_metrics[f'fp_per_image_{cname}'] = ev['fp_per_image']
+        froc_out[cname] = ev['froc']
+        scores[f'pixdice_{cname}'] = ev['per_image_pixel_dice']
+        scores[f'lesdice_{cname}'] = ev['per_image_lesion_dice']
+        scores[f'hits_{cname}']    = ev['per_lesion_hit']
+    np.savez_compressed(config.exp_dir / 'test_scores.npz', **scores)
+
+    # CV summary (best_val_dice is nan in --eval-only, where we didn't train)
+    valid_dice = [r['best_val_dice'] for r in fold_results if not np.isnan(r['best_val_dice'])]
+    cv_dice = float(np.mean(valid_dice)) if valid_dice else float('nan')
+    cv_std  = float(np.std(valid_dice)) if valid_dice else 0.0
 
     print(f'\nCV Dice (mean ± std): {cv_dice:.4f} ± {cv_std:.4f}')
     print('\nTest metrics:')
@@ -420,6 +456,7 @@ def main():
         'cv_dice_std': float(cv_std),
         'fold_results': fold_results,
         **{f'test_{k}': v for k, v in test_metrics.items()},
+        'froc': froc_out,
     }
     reporter_final = Reporter(config, fold=None)
     reporter_final.save_test_results(final)
