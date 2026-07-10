@@ -88,6 +88,33 @@ def _tta_predict(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
     return (logits + logits_hflip + logits_vflip) / 3.0
 
 
+def _score_predictions(preds_list, targets_list, config, use_hd95, want_scores=False):
+    """Full test-metric suite for one set of per-batch logits (a single model or the
+    ensemble). Returns (metrics: dict, froc_out: dict, scores: dict). `scores` (per-image
+    sidecar arrays for paired stats) is only populated when want_scores=True."""
+    m_list = [compute_batch_metrics(logits, tgt, config)
+              for logits, tgt in zip(preds_list, targets_list)]
+    metrics = {k: float(np.mean([m[k] for m in m_list])) for k in m_list[0]}
+    if use_hd95:
+        metrics.update(compute_hd95_epoch(preds_list, targets_list, config.classes))
+
+    probs_np = torch.sigmoid(torch.cat(preds_list, dim=0)).numpy()      # [N, C, H, W]
+    gts_np   = torch.cat(targets_list, dim=0).numpy().astype(np.uint8)
+    froc_out, scores = {}, {}
+    for ci, cname in enumerate(config.classes):
+        ev = evaluate_class(probs_np[:, ci], gts_np[:, ci])
+        metrics[f'lesion_dice_{cname}']  = ev['lesion_dice']
+        metrics[f'lesion_hd95_{cname}']  = ev['lesion_hd95']
+        metrics[f'sensitivity_{cname}']  = ev['sensitivity']
+        metrics[f'fp_per_image_{cname}'] = ev['fp_per_image']
+        froc_out[cname] = ev['froc']
+        if want_scores:
+            scores[f'pixdice_{cname}'] = ev['per_image_pixel_dice']
+            scores[f'lesdice_{cname}'] = ev['per_image_lesion_dice']
+            scores[f'hits_{cname}']    = ev['per_lesion_hit']
+    return metrics, froc_out, scores
+
+
 # ── BatchNorm freezing ────────────────────────────────────────────────────────
 
 def _freeze_encoder_bn(model: torch.nn.Module):
@@ -385,8 +412,12 @@ def main():
                              persistent_workers=(nw > 0),
                              multiprocessing_context='spawn' if nw > 0 else None)
 
-    # Ensemble: average logits from each fold's best checkpoint
+    # Ensemble: average logits from each fold's best checkpoint. Each fold is also
+    # scored individually (right after its inference) so we can report per-model
+    # mean±std alongside the ensemble — keeping only the running sum + current fold
+    # in memory instead of all folds' predictions at once.
     all_preds, all_targets_list, all_files = None, [], []
+    per_fold_metrics, per_fold_froc = [], []
     for res in fold_results:
         model = build_model(config).to(device)
         ckpt  = torch.load(res['checkpoint'], map_location=device, weights_only=False)
@@ -404,6 +435,10 @@ def main():
                     all_targets_list.append(masks)
                     all_files.extend(batch['filename'])
 
+        fm, ff, _ = _score_predictions(fold_preds, all_targets_list, config, use_hd95)
+        per_fold_metrics.append(fm)
+        per_fold_froc.append(ff)
+
         if all_preds is None:
             all_preds = fold_preds
         else:
@@ -411,32 +446,31 @@ def main():
 
     all_preds = [p / len(fold_results) for p in all_preds]
 
-    all_m = [compute_batch_metrics(logits, tgt, config)
-             for logits, tgt in zip(all_preds, all_targets_list)]
-    test_metrics = {k: float(np.mean([m[k] for m in all_m])) for k in all_m[0]}
+    # Ensemble metrics + FROC + per-image sidecar (for McNemar/Wilcoxon downstream).
+    test_metrics, froc_out, scores = _score_predictions(
+        all_preds, all_targets_list, config, use_hd95, want_scores=True)
+    np.savez_compressed(config.exp_dir / 'test_scores.npz',
+                        files=np.array(all_files, dtype=object), **scores)
 
-    if use_hd95:
-        hd = compute_hd95_epoch(all_preds, all_targets_list, config.classes)
-        test_metrics.update(hd)
+    # ── Per-model aggregation: mean ± std of each metric across the fold models ──
+    per_model_test = {}
+    for k in per_fold_metrics[0]:
+        vals = [pm[k] for pm in per_fold_metrics]
+        per_model_test[k] = {'mean': float(np.nanmean(vals)),
+                             'std':  float(np.nanstd(vals)),
+                             'values': [float(v) for v in vals]}
 
-    # ── Lesion-wise detection metrics + FROC (per class) ────────────────────
-    # Runs on the ensembled probabilities; also saves a per-image sidecar for the
-    # paired stats (McNemar/Wilcoxon) in compare_experiments.py.
-    probs_np = torch.sigmoid(torch.cat(all_preds, dim=0)).numpy()      # [N, C, H, W]
-    gts_np   = torch.cat(all_targets_list, dim=0).numpy().astype(np.uint8)
-    froc_out = {}
-    scores = {'files': np.array(all_files, dtype=object)}
-    for ci, cname in enumerate(config.classes):
-        ev = evaluate_class(probs_np[:, ci], gts_np[:, ci])
-        test_metrics[f'lesion_dice_{cname}']  = ev['lesion_dice']
-        test_metrics[f'lesion_hd95_{cname}']  = ev['lesion_hd95']
-        test_metrics[f'sensitivity_{cname}']  = ev['sensitivity']
-        test_metrics[f'fp_per_image_{cname}'] = ev['fp_per_image']
-        froc_out[cname] = ev['froc']
-        scores[f'pixdice_{cname}'] = ev['per_image_pixel_dice']
-        scores[f'lesdice_{cname}'] = ev['per_image_lesion_dice']
-        scores[f'hits_{cname}']    = ev['per_lesion_hit']
-    np.savez_compressed(config.exp_dir / 'test_scores.npz', **scores)
+    per_model_froc = {}
+    for cname in config.classes:
+        thrs = [p['threshold'] for p in per_fold_froc[0][cname]]
+        agg = []
+        for ti, t in enumerate(thrs):
+            sens = [per_fold_froc[i][cname][ti]['sensitivity']  for i in range(len(per_fold_froc))]
+            fps  = [per_fold_froc[i][cname][ti]['fp_per_image'] for i in range(len(per_fold_froc))]
+            agg.append({'threshold': t,
+                        'sensitivity_mean': float(np.nanmean(sens)), 'sensitivity_std': float(np.nanstd(sens)),
+                        'fp_per_image_mean': float(np.nanmean(fps)),  'fp_per_image_std':  float(np.nanstd(fps))})
+        per_model_froc[cname] = agg
 
     # CV summary (best_val_dice is nan in --eval-only, where we didn't train)
     valid_dice = [r['best_val_dice'] for r in fold_results if not np.isnan(r['best_val_dice'])]
@@ -457,9 +491,12 @@ def main():
         'fold_results': fold_results,
         **{f'test_{k}': v for k, v in test_metrics.items()},
         'froc': froc_out,
+        'per_model_test': per_model_test,
+        'per_model_froc': per_model_froc,
     }
     reporter_final = Reporter(config, fold=None)
     reporter_final.save_test_results(final)
+    reporter_final.log_per_model(per_model_test)
     reporter_final.log_froc(froc_out)
     reporter_final.finish()
 

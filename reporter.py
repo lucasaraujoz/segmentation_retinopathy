@@ -132,6 +132,16 @@ class Reporter:
                        if isinstance(v, (int, float)) and not isinstance(v, bool)}
             wandb.log(scalars)
 
+    def log_per_model(self, per_model: dict):
+        """Log per-model mean/std of each test metric as W&B scalars."""
+        if not self._wandb_active:
+            return
+        flat = {}
+        for k, v in per_model.items():
+            flat[f'test/{k}_mean'] = v['mean']
+            flat[f'test/{k}_std']  = v['std']
+        wandb.log(flat)
+
     def log_froc(self, froc_out: dict[str, list[dict]]):
         """Log one FROC custom chart per class (sensitivity vs FP/image)."""
         if not self._wandb_active:
