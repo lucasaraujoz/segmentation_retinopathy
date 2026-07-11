@@ -175,6 +175,21 @@ EXPERIMENTS: dict[str, Config] = {
         wavelet_include_ll=True,
     ),
 
+    # ── Skip POSITION on the best depth (L2 + LL), hemorrhage-only ────────────
+    # Every H* arm fixed skips=(0,1); position is the one untested axis. Depth is
+    # already swept (L1/L2/L3 all tied). Keep the only combo with a rationale
+    # (L2 + LL) and open coverage to all skips (0,1,2,3) — deeper skips operate on
+    # coarser feature maps, matching hemorrhage's large low-frequency scale.
+    # Index 4 (features[5]) is the bottleneck → excluded. Compare GAP vs H0/H2L2.
+    'H2L2A': Config(
+        exp_id='H2L2A', exp_name='hem_haar_ll_L2_allskips',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=2,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+    ),
+
     # ── Wavelet WITHOUT pretraining, hemorrhage-only ─────────────────────────
     # Pretrained arms (H0-H4) all tied → hypothesis: ImageNet already supplies the
     # low-freq/edge prior wavelet would give. From scratch the prior may matter:
