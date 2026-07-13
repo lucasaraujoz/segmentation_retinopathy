@@ -18,6 +18,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
+from sklearn.metrics import average_precision_score
 
 
 def _structure(connectivity: int) -> np.ndarray:
@@ -189,7 +190,15 @@ def evaluate_class(probs: np.ndarray, gts: np.ndarray, thr: float = 0.5,
         sens = a['tp'] / (a['tp'] + a['fn']) if (a['tp'] + a['fn']) else float('nan')
         froc.append({'threshold': float(t), 'sensitivity': sens, 'fp_per_image': a['fp'] / n})
 
+    # Pixel-wise Area Under the Precision-Recall curve (threshold-free). This is the
+    # primary metric in the DR-lesion literature (M2MRF/WSRFNet/HACDR-Net/WFDENet) and,
+    # unlike Dice@0.5, is sensitive to sub-1% differences. Undefined without positives.
+    gts_flat = (gts.reshape(-1) > 0).astype(np.uint8)
+    aupr = (float(average_precision_score(gts_flat, probs.reshape(-1)))
+            if gts_flat.any() else float('nan'))
+
     return {
+        'aupr': aupr,
         'pixel_dice': float(np.mean(per_pix)),
         'lesion_dice': float(np.nanmean(per_lesdice)),
         'lesion_hd95': float(np.nanmean(per_leshd95)),

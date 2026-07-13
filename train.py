@@ -64,6 +64,8 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from segmentation_models_pytorch.losses import DiceLoss
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -101,17 +103,21 @@ def _score_predictions(preds_list, targets_list, config, use_hd95, want_scores=F
     probs_np = torch.sigmoid(torch.cat(preds_list, dim=0)).numpy()      # [N, C, H, W]
     gts_np   = torch.cat(targets_list, dim=0).numpy().astype(np.uint8)
     froc_out, scores = {}, {}
+    aupr_per_class = []
     for ci, cname in enumerate(config.classes):
         ev = evaluate_class(probs_np[:, ci], gts_np[:, ci])
+        metrics[f'aupr_{cname}']         = ev['aupr']
         metrics[f'lesion_dice_{cname}']  = ev['lesion_dice']
         metrics[f'lesion_hd95_{cname}']  = ev['lesion_hd95']
         metrics[f'sensitivity_{cname}']  = ev['sensitivity']
         metrics[f'fp_per_image_{cname}'] = ev['fp_per_image']
+        aupr_per_class.append(ev['aupr'])
         froc_out[cname] = ev['froc']
         if want_scores:
             scores[f'pixdice_{cname}'] = ev['per_image_pixel_dice']
             scores[f'lesdice_{cname}'] = ev['per_image_lesion_dice']
             scores[f'hits_{cname}']    = ev['per_lesion_hit']
+    metrics['mAUPR'] = float(np.nanmean(aupr_per_class))
     return metrics, froc_out, scores
 
 
@@ -136,6 +142,19 @@ def _freeze_encoder_bn(model: torch.nn.Module):
 
 # ── Epoch loops ───────────────────────────────────────────────────────────────
 
+# Auxiliary Dice for deep supervision: same DiceLoss the main criterion uses (losses.py:43).
+_AUX_DICE = DiceLoss(mode='multilabel', smooth=1.0, from_logits=True)
+
+
+def _deepsup_loss(aux_logits, masks):
+    """Mean Dice loss of the auxiliary heads vs the target downsampled to each head's resolution."""
+    total = 0.0
+    for aux in aux_logits:
+        target = F.interpolate(masks.float(), size=aux.shape[-2:], mode='nearest')
+        total = total + _AUX_DICE(aux, target.long())
+    return total / len(aux_logits)
+
+
 def train_epoch(model, loader, criterion, optimizer, scheduler, device, accumulation_steps, config):
     model.train()
     # Freezing encoder BN only helps when it holds pretrained running stats. Training
@@ -151,8 +170,12 @@ def train_epoch(model, loader, criterion, optimizer, scheduler, device, accumula
         images = batch['image'].to(device)
         masks  = batch['mask'].to(device)
 
-        logits = model(images)
-        loss   = criterion(logits, masks) / accumulation_steps
+        out = model(images)
+        logits, aux_logits = out if isinstance(out, tuple) else (out, [])
+        loss = criterion(logits, masks)
+        if aux_logits:
+            loss = loss + config.deepsup_weight * _deepsup_loss(aux_logits, masks)
+        loss = loss / accumulation_steps
         loss.backward()
 
         if (step + 1) % accumulation_steps == 0 or (step + 1) == len(loader):

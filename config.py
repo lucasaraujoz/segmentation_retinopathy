@@ -28,6 +28,14 @@ class Config:
     wavelet_level: int = 1                  # decomposition depth
     wavelet_skip_indices: Tuple[int, ...] = ()  # empty = baseline (no wavelet)
     wavelet_include_ll: bool = False        # also inject the final approximation (LL) band, not only details
+    # Skip-connection fusion style:
+    #   'passive'  — WaveletSkipConnection: DWT → upsample details → concat → 1x1 (original)
+    #   'idwt'     — ActiveWaveletFusion: DWT → per-band 1x1 → IDWT reconstruct → residual add
+    #   'idwt_enh' — 'idwt' + LL conv booster + CBAM-lite denoising on the detail bands
+    wavelet_fusion: str = 'passive'
+    # Deep supervision: auxiliary Dice head on each wavelet-enhanced skip (WFDENet-style), λ below.
+    deep_supervision: bool = False
+    deepsup_weight: float = 0.5
 
     # --- Training ---
     batch_size: int = 4                     # EfficientNet-B4 @ 512x512 needs ~3GB/sample
@@ -188,6 +196,40 @@ EXPERIMENTS: dict[str, Config] = {
         wavelet_family='haar', wavelet_level=2,
         wavelet_skip_indices=(0, 1, 2, 3),
         wavelet_include_ll=True,
+    ),
+
+    # ── Active wavelet fusion (WFDENet-style), hemorrhage-only ───────────────
+    # Passive skips (H1–H2L2A) were null: the branch is upsample+concat, no IDWT
+    # reconstruction / no per-band enhancement / no aux loss, so the net ignores it
+    # (project_wfdenet_analysis). H5→H7 add the missing active components one at a
+    # time (isolable ablation). All inherit H0's setup + L2/all-skips/LL like H2L2A.
+    'H5': Config(
+        exp_id='H5', exp_name='hem_awf_idwt',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=2,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+        wavelet_fusion='idwt',              # DWT → per-band 1x1 → IDWT → residual
+    ),
+    'H6': Config(
+        exp_id='H6', exp_name='hem_awf_enhanced',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=2,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+        wavelet_fusion='idwt_enh',          # H5 + LL booster + CBAM-lite HF denoising
+    ),
+    'H7': Config(
+        exp_id='H7', exp_name='hem_awf_deepsup',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=2,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+        wavelet_fusion='idwt_enh',
+        deep_supervision=True,              # H6 + auxiliary Dice heads on wavelet skips
     ),
 
     # ── Wavelet WITHOUT pretraining, hemorrhage-only ─────────────────────────
