@@ -20,6 +20,7 @@ import torch.nn as nn
 import segmentation_models_pytorch as smp
 
 from .wavelet import WaveletSkipConnection, ActiveWaveletFusion
+from .wfdenet import WFDENet
 from config import Config
 
 
@@ -94,6 +95,25 @@ def build_model(config: Config) -> nn.Module:
     Instantiate and return the appropriate model for the experiment config.
     All models produce raw logits (no sigmoid) for use with BCEWithLogitsLoss.
     """
+    if config.arch == 'wfdenet':
+        encoder = smp.encoders.get_encoder(
+            config.encoder_name,
+            in_channels=config.in_channels,
+            depth=5,
+            weights=config.encoder_weights,
+        )
+        return WFDENet(
+            encoder=encoder,
+            encoder_channels=encoder.out_channels[-5:],
+            out_channels=config.out_channels,
+            wavelet=config.wavelet_family,
+            use_lfb=config.wfdenet_use_lfb,
+            use_hfb=config.wfdenet_use_hfb,
+            use_ccfam=config.wfdenet_use_ccfam,
+            use_sd=config.wfdenet_use_sd,
+            deep_supervision=config.deep_supervision,
+        )
+
     base = smp.Unet(
         encoder_name=config.encoder_name,
         encoder_weights=config.encoder_weights,
