@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import segmentation_models_pytorch as smp
 
-from .wavelet import WaveletSkipConnection, ActiveWaveletFusion
+from .wavelet import WaveletSkipConnection, ActiveWaveletFusion, AsymmetricWaveletSkip
 from .wfdenet import WFDENet
 from config import Config
 
@@ -35,6 +35,8 @@ class WaveletUnet(nn.Module):
         wavelet_level: int,
         wavelet_include_ll: bool = False,
         wavelet_fusion: str = 'passive',
+        aws_use_gate: bool = True,
+        aws_symmetric: bool = False,
         deep_supervision: bool = False,
         out_channels: int = 1,
         in_channels: int = 3,
@@ -58,6 +60,11 @@ class WaveletUnet(nn.Module):
             if wavelet_fusion == 'passive':
                 self.wavelet_modules[key] = WaveletSkipConnection(
                     in_ch, wavelet_family, wavelet_level, include_ll=wavelet_include_ll
+                )
+            elif wavelet_fusion == 'asym':
+                self.wavelet_modules[key] = AsymmetricWaveletSkip(
+                    in_ch, wavelet_family, wavelet_level,
+                    use_gate=aws_use_gate, symmetric=aws_symmetric,
                 )
             else:
                 self.wavelet_modules[key] = ActiveWaveletFusion(
@@ -132,6 +139,8 @@ def build_model(config: Config) -> nn.Module:
         wavelet_level=config.wavelet_level,
         wavelet_include_ll=config.wavelet_include_ll,
         wavelet_fusion=config.wavelet_fusion,
+        aws_use_gate=config.aws_use_gate,
+        aws_symmetric=config.aws_symmetric,
         deep_supervision=config.deep_supervision,
         out_channels=config.out_channels,
         in_channels=config.in_channels,

@@ -230,3 +230,103 @@ class ActiveWaveletFusion(nn.Module):
             ll = self._idwt_one_level(ll, LH, HL, HH, sizes[lvl])
 
         return x + self.reduce(ll)
+
+
+class AsymmetricWaveletSkip(nn.Module):
+    """Asymmetric wavelet skip for LOW-frequency lesions (hemorrhage) — our contribution.
+
+    The usual wavelet-enhancement paradigm (WFDENet, GobletNet) boosts the high-frequency
+    detail bands. For hemorrhage that is counter-productive: the lesion signal lives in the
+    LL (low-freq) band, while the dominant false-positive source — vessels — lives in the
+    ORIENTED high-freq bands (strong, coherent LH/HL). So we treat the bands by ROLE:
+
+      * LL  → enhanced (semantics / FP suppression), reconstructed via IDWT.
+      * HF  → NOT reconstructed as lesion detail; instead it builds a spatial vessel-
+              suppression gate g∈[0,1] that attenuates the reconstruction where oriented
+              high-freq energy indicates a vessel.
+
+      out = x + α · proj_out( IDWT(LLe, 0, 0, 0) ⊙ g )
+
+    Channel-unify to `work_channels` first, so the DWT does not run on the raw 160-ch deep
+    skip (the noise source we diagnosed in H2L2A/H5). Ablation flags:
+      use_gate=False → LL-enhance + IDWT only (isolates the gate's effect).
+      symmetric=True → enhance & reconstruct ALL bands (the "fixed H5" control); the gate is
+                       disabled and HF is reconstructed as detail — tests the core hypothesis
+                       that enhancing HF hurts vs. suppressing it.
+    """
+
+    def __init__(self, in_channels: int, wavelet: str = 'haar', level: int = 1,
+                 work_channels: int = 64, use_gate: bool = True, symmetric: bool = False):
+        super().__init__()
+        self.level = level
+        self.symmetric = symmetric
+        self.use_gate = bool(use_gate) and not symmetric
+        Cw = work_channels
+
+        filters = _build_2d_filters(wavelet)              # [4,1,L,L]; orthonormal
+        self.register_buffer('filters', filters)
+        self.pad = (filters.shape[-1] - 2) // 2
+
+        self.proj_in = nn.Sequential(
+            nn.Conv2d(in_channels, Cw, 1, bias=False), nn.BatchNorm2d(Cw), nn.ReLU(inplace=True),
+        )
+        self.ll_conv = nn.Sequential(
+            nn.Conv2d(Cw, Cw, 3, padding=1, bias=False), nn.BatchNorm2d(Cw), nn.ReLU(inplace=True),
+        )
+        if self.use_gate:
+            # Vessel gate from the oriented HF magnitudes (|LH|,|HL|,|HH|) → 1 spatial map.
+            self.gate_conv = nn.Sequential(
+                nn.Conv2d(3 * Cw, Cw, 3, padding=1, bias=False), nn.BatchNorm2d(Cw), nn.ReLU(inplace=True),
+                nn.Conv2d(Cw, 1, 1, bias=True),
+            )
+        if symmetric:
+            self.hf_conv = nn.ModuleList([nn.Conv2d(Cw, Cw, 1, bias=True) for _ in range(3)])
+        self.proj_out = nn.Conv2d(Cw, in_channels, 1, bias=True)
+        self.alpha = nn.Parameter(torch.tensor(0.1))     # gentle residual (not zero-init like H5)
+
+    def _dwt_one_level(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        p = self.pad
+        xp = F.pad(x, (p, p, p, p), mode='reflect') if p > 0 else x
+        xr = xp.reshape(B * C, 1, xp.shape[-2], xp.shape[-1])
+        out = F.conv2d(xr, self.filters, stride=2)
+        out = out.reshape(B, C, 4, out.shape[-2], out.shape[-1])
+        return out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3]
+
+    def _idwt_one_level(self, ll, lh, hl, hh, out_size):
+        B, C = ll.shape[:2]
+        coeffs = torch.stack([ll, lh, hl, hh], dim=2).reshape(B * C, 4, ll.shape[-2], ll.shape[-1])
+        rec = F.conv_transpose2d(coeffs, self.filters, stride=2)
+        rec = rec.reshape(B, C, rec.shape[-2], rec.shape[-1])
+        Ht, Wt = out_size
+        top = (rec.shape[-2] - Ht) // 2
+        left = (rec.shape[-1] - Wt) // 2
+        return rec[..., top:top + Ht, left:left + Wt]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        u = self.proj_in(x)
+        approx = u
+        sizes, details = [], []
+        for _ in range(self.level):
+            sizes.append(approx.shape[-2:])
+            approx, lh, hl, hh = self._dwt_one_level(approx)
+            details.append((lh, hl, hh))
+
+        ll = self.ll_conv(approx)                         # enhanced coarsest LL
+        for lvl in reversed(range(self.level)):
+            if self.symmetric:
+                lh, hl, hh = (self.hf_conv[i](b) for i, b in enumerate(details[lvl]))
+            else:
+                z = torch.zeros_like(ll)                  # HF dropped from reconstruction
+                lh = hl = hh = z
+            ll = self._idwt_one_level(ll, lh, hl, hh, sizes[lvl])
+
+        rec = ll                                          # low-freq reconstruction at x resolution
+        if self.use_gate:
+            lh, hl, hh = details[0]                        # finest oriented HF
+            mag = torch.cat([lh.abs(), hl.abs(), hh.abs()], dim=1)
+            g = torch.sigmoid(self.gate_conv(mag))        # [B,1,h/2,w/2]
+            g = F.interpolate(g, size=x.shape[-2:], mode='bilinear', align_corners=False)
+            rec = rec * g
+
+        return x + self.alpha * self.proj_out(rec)

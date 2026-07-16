@@ -43,6 +43,9 @@ class Config:
     wfdenet_use_hfb: bool = True
     wfdenet_use_ccfam: bool = True
     wfdenet_use_sd: bool = True
+    # Asymmetric Wavelet Skip (AWS) — used when wavelet_fusion='asym' (our contribution)
+    aws_use_gate: bool = True         # vessel-suppression gate from the oriented HF bands
+    aws_symmetric: bool = False       # True = enhance/reconstruct ALL bands (the "fixed H5" control)
 
     # --- Training ---
     batch_size: int = 4                     # EfficientNet-B4 @ 512x512 needs ~3GB/sample
@@ -283,6 +286,41 @@ EXPERIMENTS: dict[str, Config] = {
         arch='wfdenet',
         deep_supervision=True,
         wfdenet_use_sd=False,               # SD adjacent-fusion → residual block
+    ),
+
+    # ── Asymmetric Wavelet Skip (AWS), hemorrhage-only — OUR CONTRIBUTION ─────
+    # Paradigm inversion motivated by the frequency-localization evidence + the W0
+    # ablation (WFDENet's hemorrhage gain is 100% low-freq; the HFB is dead weight):
+    # LL is ENHANCED (semantics/FP↓), the oriented HF bands become a vessel-SUPPRESSION
+    # gate (not lesion detail). Lightweight, plugs into the stock smp UNet decoder
+    # (WaveletUnet path), same recipe as H0 for a fair gap. A_sym / A_noGate isolate
+    # the asymmetry as the source of the gain. Success = gap vs H0/W0 in AUPR/FROC/FP.
+    'A0': Config(
+        exp_id='A0', exp_name='aws_asym_gate',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_fusion='asym',
+        aws_use_gate=True, aws_symmetric=False,
+    ),
+    'A_noGate': Config(
+        exp_id='A_noGate', exp_name='aws_asym_nogate',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_fusion='asym',
+        aws_use_gate=False, aws_symmetric=False,   # LL-enhance + IDWT only (isolates the gate)
+    ),
+    'A_sym': Config(
+        exp_id='A_sym', exp_name='aws_symmetric',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_fusion='asym',
+        aws_symmetric=True,                        # enhance ALL bands = the "fixed H5" control
     ),
 
     # ── Wavelet WITHOUT pretraining, hemorrhage-only ─────────────────────────
