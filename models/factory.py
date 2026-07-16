@@ -19,7 +19,9 @@ import torch
 import torch.nn as nn
 import segmentation_models_pytorch as smp
 
-from .wavelet import WaveletSkipConnection, ActiveWaveletFusion, AsymmetricWaveletSkip
+from .wavelet import (
+    WaveletSkipConnection, ActiveWaveletFusion, AsymmetricWaveletSkip, MultiScaleAsymWaveletSkip,
+)
 from .wfdenet import WFDENet
 from config import Config
 
@@ -53,11 +55,16 @@ class WaveletUnet(nn.Module):
 
         self.wavelet_modules = nn.ModuleDict()
         self.aux_heads = nn.ModuleDict()
+        self.ms_module = None          # set for cross-level fusion ('asym_ms')
+        in_ch_list = []
         for skip_idx in wavelet_skip_indices:
             feat_idx = skip_idx + 1    # features[0] is raw input, skip[0] = features[1]
             in_ch = features[feat_idx].shape[1]
+            in_ch_list.append(in_ch)
             key = str(skip_idx)
-            if wavelet_fusion == 'passive':
+            if wavelet_fusion == 'asym_ms':
+                pass                   # one cross-level module, built after the loop
+            elif wavelet_fusion == 'passive':
                 self.wavelet_modules[key] = WaveletSkipConnection(
                     in_ch, wavelet_family, wavelet_level, include_ll=wavelet_include_ll
                 )
@@ -74,6 +81,11 @@ class WaveletUnet(nn.Module):
             if deep_supervision:
                 self.aux_heads[key] = nn.Conv2d(in_ch, out_channels, kernel_size=1)
 
+        if wavelet_fusion == 'asym_ms':
+            # Sees every selected skip at once and fuses across levels; assumes the indices are
+            # ascending (finest → coarsest), which is how they are configured.
+            self.ms_module = MultiScaleAsymWaveletSkip(in_ch_list, wavelet_family)
+
         self.wavelet_skip_indices = wavelet_skip_indices
         self.deep_supervision = deep_supervision
 
@@ -81,12 +93,20 @@ class WaveletUnet(nn.Module):
         features = list(self.encoder(x))
 
         aux_logits = []
-        for skip_idx in self.wavelet_skip_indices:
-            feat_idx = skip_idx + 1
-            enhanced = self.wavelet_modules[str(skip_idx)](features[feat_idx])
-            features[feat_idx] = enhanced
-            if self.deep_supervision and self.training:
-                aux_logits.append(self.aux_heads[str(skip_idx)](enhanced))
+        if self.ms_module is not None:
+            skips = [features[i + 1] for i in self.wavelet_skip_indices]
+            enhanced_list = self.ms_module(skips)
+            for k, skip_idx in enumerate(self.wavelet_skip_indices):
+                features[skip_idx + 1] = enhanced_list[k]
+                if self.deep_supervision and self.training:
+                    aux_logits.append(self.aux_heads[str(skip_idx)](enhanced_list[k]))
+        else:
+            for skip_idx in self.wavelet_skip_indices:
+                feat_idx = skip_idx + 1
+                enhanced = self.wavelet_modules[str(skip_idx)](features[feat_idx])
+                features[feat_idx] = enhanced
+                if self.deep_supervision and self.training:
+                    aux_logits.append(self.aux_heads[str(skip_idx)](enhanced))
 
         decoder_out = self.decoder(features)
         logits = self.seg_head(decoder_out)

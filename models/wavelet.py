@@ -330,3 +330,93 @@ class AsymmetricWaveletSkip(nn.Module):
             rec = rec * g
 
         return x + self.alpha * self.proj_out(rec)
+
+
+class MultiScaleAsymWaveletSkip(nn.Module):
+    """Multi-scale asymmetric wavelet skip — sees ALL skips at once and fuses ACROSS levels.
+
+    Why this exists: A0 (`AsymmetricWaveletSkip`) has the full per-skip machinery (channel unify,
+    LL enhancement, IDWT, vessel gate) yet lands at baseline, while the full WFDENet (W0) clearly
+    wins. The difference is that W0 aggregates the low-frequency bands ACROSS levels (its FPN-like
+    LFB). So the active ingredient is multi-scale low-frequency aggregation, NOT per-skip band
+    manipulation. This module isolates exactly that hypothesis: keep the asymmetry (reconstruct
+    low-frequency only), add the cross-level fusion, and drop everything else W0 has — no complex
+    Fourier attention (CCFAM), no custom decoder, no deep supervision, and no vessel gate (it
+    demonstrably never fired: A0's FP went UP).
+
+    Question it answers: is multi-scale low-frequency fusion alone enough to match the heavy SOTA?
+
+      per level i:  u_i  = proj_in_i(x_i)                     (1×1 → Cw, unify)
+                    LL_i = DWT(u_i).LL                        (half res; details discarded)
+      top-down:     E_n  = conv3x3(LL_n)                      (coarsest)
+                    E_i  = conv3x3(Up2(E_{i+1}) + LL_i)       (the cross-level fusion)
+      per level i:  out_i = x_i + α_i · proj_out_i( IDWT(E_i, 0, 0, 0) )
+
+    Resolution alignment: skip_i has 2× the resolution of skip_{i+1}, so LL_i has 2× the resolution
+    of LL_{i+1} and Up2 lines them up exactly.
+
+    `skips` must be ordered finest → coarsest (i.e. ascending `wavelet_skip_indices`, as configured).
+    The FPN loop is inlined rather than importing `FPNFuse` from models/wfdenet.py on purpose:
+    wfdenet.py already imports from this module, so that would be a circular import.
+    """
+
+    def __init__(self, in_channels_list, wavelet: str = 'haar', work_channels: int = 64):
+        super().__init__()
+        self.n = len(in_channels_list)
+        Cw = work_channels
+
+        filters = _build_2d_filters(wavelet)
+        self.register_buffer('filters', filters)
+        self.pad = (filters.shape[-1] - 2) // 2
+
+        self.proj_in = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(c, Cw, 1, bias=False), nn.BatchNorm2d(Cw), nn.ReLU(inplace=True))
+            for c in in_channels_list
+        ])
+        self.fpn_conv = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(Cw, Cw, 3, padding=1, bias=False), nn.BatchNorm2d(Cw), nn.ReLU(inplace=True))
+            for _ in range(self.n)
+        ])
+        self.proj_out = nn.ModuleList([nn.Conv2d(Cw, c, 1, bias=True) for c in in_channels_list])
+        self.alpha = nn.Parameter(torch.full((self.n,), 0.1))
+
+    def _dwt_one_level(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        p = self.pad
+        xp = F.pad(x, (p, p, p, p), mode='reflect') if p > 0 else x
+        xr = xp.reshape(B * C, 1, xp.shape[-2], xp.shape[-1])
+        out = F.conv2d(xr, self.filters, stride=2)
+        out = out.reshape(B, C, 4, out.shape[-2], out.shape[-1])
+        return out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3]
+
+    def _idwt_one_level(self, ll, lh, hl, hh, out_size):
+        B, C = ll.shape[:2]
+        coeffs = torch.stack([ll, lh, hl, hh], dim=2).reshape(B * C, 4, ll.shape[-2], ll.shape[-1])
+        rec = F.conv_transpose2d(coeffs, self.filters, stride=2)
+        rec = rec.reshape(B, C, rec.shape[-2], rec.shape[-1])
+        Ht, Wt = out_size
+        top = (rec.shape[-2] - Ht) // 2
+        left = (rec.shape[-1] - Wt) // 2
+        return rec[..., top:top + Ht, left:left + Wt]
+
+    def forward(self, skips):
+        sizes, LLs = [], []
+        for i in range(self.n):
+            u = self.proj_in[i](skips[i])
+            sizes.append(u.shape[-2:])
+            ll, _, _, _ = self._dwt_one_level(u)          # details discarded (asymmetric)
+            LLs.append(ll)
+
+        # Cross-level FPN fusion of the low-frequency bands: coarsest → finest.
+        E = [None] * self.n
+        E[self.n - 1] = self.fpn_conv[self.n - 1](LLs[self.n - 1])
+        for i in range(self.n - 2, -1, -1):
+            up = F.interpolate(E[i + 1], size=LLs[i].shape[-2:], mode='bilinear', align_corners=False)
+            E[i] = self.fpn_conv[i](up + LLs[i])
+
+        out = []
+        for i in range(self.n):
+            z = torch.zeros_like(E[i])                    # low-frequency-only reconstruction
+            rec = self._idwt_one_level(E[i], z, z, z, sizes[i])
+            out.append(skips[i] + self.alpha[i] * self.proj_out[i](rec))
+        return out

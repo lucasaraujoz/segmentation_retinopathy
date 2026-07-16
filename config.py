@@ -323,6 +323,21 @@ EXPERIMENTS: dict[str, Config] = {
         aws_symmetric=True,                        # enhance ALL bands = the "fixed H5" control
     ),
 
+    # ── AWS + cross-level multi-scale fusion, hemorrhage-only ────────────────
+    # A0 landed at baseline (its vessel gate never fired: FP went UP, AUPR flat) while W0 clearly
+    # won → the active ingredient is multi-scale LOW-FREQ aggregation ACROSS levels, not per-skip
+    # band manipulation. A_MS isolates exactly that: keep the asymmetry (reconstruct low-freq only),
+    # add the FPN-style cross-level fusion, drop everything else W0 has (no CCFAM/Fourier, no custom
+    # decoder, no deep-sup, no gate). If A_MS ≈ W0 → a light module matches the heavy SOTA.
+    'A_MS': Config(
+        exp_id='A_MS', exp_name='aws_multiscale',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_fusion='asym_ms',
+    ),
+
     # ── Wavelet WITHOUT pretraining, hemorrhage-only ─────────────────────────
     # Pretrained arms (H0-H4) all tied → hypothesis: ImageNet already supplies the
     # low-freq/edge prior wavelet would give. From scratch the prior may matter:
