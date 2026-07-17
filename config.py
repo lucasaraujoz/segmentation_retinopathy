@@ -207,6 +207,55 @@ EXPERIMENTS: dict[str, Config] = {
         wavelet_skip_indices=(0, 1, 2, 3),
         wavelet_include_ll=True,
     ),
+    # ── Closing grid: POSITION × DEPTH on the passive module, hemorrhage-only ─
+    # The original ablation (exps 01-09) predates the hemorrhage-only testbed: it is
+    # multilabel + dice_focal + detail-only (include_ll=False), so it cannot be compared
+    # against H0/H2L2A. These arms re-run that same 2x3 grid inside the current protocol:
+    # passive module (all 4 subbands → upsample → concat → 1x1), haar, +LL, dice_focal_alpha.
+    # Position: first skip (0,) — the original bet, finest resolution — vs all skips.
+    # Depth: L1/L2/L3. H2L2A is the all-skips/L2 cell, so only 5 arms are missing.
+    # Expectation: flat. Extra levels add mostly DETAIL bands and hemorrhage lives in LL
+    # (AUC 0.23 vs ~0.6 detail) → depth should be null, with a mechanism, at 5 folds.
+    'H2L1A': Config(
+        exp_id='H2L1A', exp_name='hem_haar_ll_L1_allskips',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+    ),
+    'H2L3A': Config(
+        exp_id='H2L3A', exp_name='hem_haar_ll_L3_allskips',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=3,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+    ),
+    'H2L1F': Config(
+        exp_id='H2L1F', exp_name='hem_haar_ll_L1_skip0',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0,),
+        wavelet_include_ll=True,
+    ),
+    'H2L2F': Config(
+        exp_id='H2L2F', exp_name='hem_haar_ll_L2_skip0',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=2,
+        wavelet_skip_indices=(0,),
+        wavelet_include_ll=True,
+    ),
+    'H2L3F': Config(
+        exp_id='H2L3F', exp_name='hem_haar_ll_L3_skip0',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=3,
+        wavelet_skip_indices=(0,),
+        wavelet_include_ll=True,
+    ),
 
     # ── Active wavelet fusion (WFDENet-style), hemorrhage-only ───────────────
     # Passive skips (H1–H2L2A) were null: the branch is upsample+concat, no IDWT
