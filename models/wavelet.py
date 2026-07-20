@@ -420,3 +420,67 @@ class MultiScaleAsymWaveletSkip(nn.Module):
             rec = self._idwt_one_level(E[i], z, z, z, sizes[i])
             out.append(skips[i] + self.alpha[i] * self.proj_out[i](rec))
         return out
+
+
+class WaveletAttention(nn.Module):
+    """Global self-attention in the wavelet (low-frequency) domain — for false-positive suppression.
+
+    Hemorrhage false positives come from vessels: long, connected structures that need GLOBAL context
+    to tell apart from isolated blobs — a long-range problem, not a frequency one. Self-attention
+    supplies that context, and the DWT makes it cheap: attending over the LL (approximation) band uses
+    ¼ of the tokens, and the LL is exactly where the lesion-vs-vessel semantics live (our pixelwise
+    evidence). Wave-ViT (cited by WFDENet) uses the same trick to keep self-attention tractable. The
+    detail bands (LH/HL/HH) are carried through untouched by the IDWT, so no detail is lost.
+
+        DWT(x) → LL,LH,HL,HH ; LL → transformer block → LL' ; x + γ·IDWT(LL',LH,HL,HH)
+
+    Placed at the bottleneck (smallest, most semantic map), the LL is tiny (e.g. 8×8 = 64 tokens) so
+    the attention is nearly free. ``gamma`` starts small (0.1) so the block refines gently without
+    shocking the pretrained encoder, yet still receives gradient (unlike a zero-init branch).
+    """
+
+    def __init__(self, channels: int, num_heads: int = 4, mlp_ratio: float = 2.0,
+                 wavelet: str = 'haar'):
+        super().__init__()
+        filters = _build_2d_filters(wavelet)              # [4,1,L,L]; orthonormal
+        self.register_buffer('filters', filters)
+        self.pad = (filters.shape[-1] - 2) // 2
+
+        self.norm1 = nn.LayerNorm(channels)
+        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(channels)
+        hidden = int(channels * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, hidden), nn.GELU(), nn.Linear(hidden, channels),
+        )
+        self.gamma = nn.Parameter(torch.full((1,), 0.1))  # gentle residual scale (alive, not dead)
+
+    def _dwt_one_level(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        p = self.pad
+        xp = F.pad(x, (p, p, p, p), mode='reflect') if p > 0 else x
+        xr = xp.reshape(B * C, 1, xp.shape[-2], xp.shape[-1])
+        out = F.conv2d(xr, self.filters, stride=2)
+        out = out.reshape(B, C, 4, out.shape[-2], out.shape[-1])
+        return out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3]
+
+    def _idwt_one_level(self, ll, lh, hl, hh, out_size):
+        B, C = ll.shape[:2]
+        coeffs = torch.stack([ll, lh, hl, hh], dim=2).reshape(B * C, 4, ll.shape[-2], ll.shape[-1])
+        rec = F.conv_transpose2d(coeffs, self.filters, stride=2)
+        rec = rec.reshape(B, C, rec.shape[-2], rec.shape[-1])
+        Ht, Wt = out_size
+        top = (rec.shape[-2] - Ht) // 2
+        left = (rec.shape[-1] - Wt) // 2
+        return rec[..., top:top + Ht, left:left + Wt]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        ll, lh, hl, hh = self._dwt_one_level(x)           # LL: [B, C, H/2, W/2]
+        B, C, h, w = ll.shape
+        z = ll.flatten(2).transpose(1, 2)                 # [B, N, C], N = h*w
+        zn = self.norm1(z)
+        z = z + self.attn(zn, zn, zn, need_weights=False)[0]
+        z = z + self.mlp(self.norm2(z))
+        ll2 = z.transpose(1, 2).reshape(B, C, h, w)
+        rec = self._idwt_one_level(ll2, lh, hl, hh, x.shape[-2:])
+        return x + self.gamma * rec

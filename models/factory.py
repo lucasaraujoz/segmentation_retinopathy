@@ -21,6 +21,7 @@ import segmentation_models_pytorch as smp
 
 from .wavelet import (
     WaveletSkipConnection, ActiveWaveletFusion, AsymmetricWaveletSkip, MultiScaleAsymWaveletSkip,
+    WaveletAttention,
 )
 from .wfdenet import WFDENet
 from config import Config
@@ -40,6 +41,9 @@ class WaveletUnet(nn.Module):
         aws_use_gate: bool = True,
         aws_symmetric: bool = False,
         deep_supervision: bool = False,
+        deepsup_indices: tuple = (),
+        bottleneck_attn: bool = False,
+        attn_heads: int = 4,
         out_channels: int = 1,
         in_channels: int = 3,
     ):
@@ -52,6 +56,9 @@ class WaveletUnet(nn.Module):
         with torch.no_grad():
             dummy = torch.zeros(1, in_channels, 512, 512)
             features = self.encoder(dummy)
+
+        # Which wavelet skips get deep-supervision aux heads (empty = all selected skips).
+        self.deepsup_indices = tuple(deepsup_indices) if deepsup_indices else tuple(wavelet_skip_indices)
 
         self.wavelet_modules = nn.ModuleDict()
         self.aux_heads = nn.ModuleDict()
@@ -78,13 +85,19 @@ class WaveletUnet(nn.Module):
                     in_ch, wavelet_family, wavelet_level,
                     include_ll=wavelet_include_ll, enhance=(wavelet_fusion == 'idwt_enh'),
                 )
-            if deep_supervision:
+            if deep_supervision and skip_idx in self.deepsup_indices:
                 self.aux_heads[key] = nn.Conv2d(in_ch, out_channels, kernel_size=1)
 
         if wavelet_fusion == 'asym_ms':
             # Sees every selected skip at once and fuses across levels; assumes the indices are
             # ascending (finest → coarsest), which is how they are configured.
             self.ms_module = MultiScaleAsymWaveletSkip(in_ch_list, wavelet_family)
+
+        # Wavelet self-attention on the bottleneck (global context → false-positive suppression).
+        self.attn_module = None
+        if bottleneck_attn:
+            self.attn_module = WaveletAttention(features[-1].shape[1], num_heads=attn_heads,
+                                                wavelet=wavelet_family)
 
         self.wavelet_skip_indices = wavelet_skip_indices
         self.deep_supervision = deep_supervision
@@ -98,15 +111,19 @@ class WaveletUnet(nn.Module):
             enhanced_list = self.ms_module(skips)
             for k, skip_idx in enumerate(self.wavelet_skip_indices):
                 features[skip_idx + 1] = enhanced_list[k]
-                if self.deep_supervision and self.training:
+                if self.deep_supervision and self.training and str(skip_idx) in self.aux_heads:
                     aux_logits.append(self.aux_heads[str(skip_idx)](enhanced_list[k]))
         else:
             for skip_idx in self.wavelet_skip_indices:
                 feat_idx = skip_idx + 1
                 enhanced = self.wavelet_modules[str(skip_idx)](features[feat_idx])
                 features[feat_idx] = enhanced
-                if self.deep_supervision and self.training:
+                if self.deep_supervision and self.training and str(skip_idx) in self.aux_heads:
                     aux_logits.append(self.aux_heads[str(skip_idx)](enhanced))
+
+        # Bottleneck wavelet self-attention (global context; refines the deepest feature).
+        if self.attn_module is not None:
+            features[-1] = self.attn_module(features[-1])
 
         decoder_out = self.decoder(features)
         logits = self.seg_head(decoder_out)
@@ -162,6 +179,9 @@ def build_model(config: Config) -> nn.Module:
         aws_use_gate=config.aws_use_gate,
         aws_symmetric=config.aws_symmetric,
         deep_supervision=config.deep_supervision,
+        deepsup_indices=config.deepsup_indices,
+        bottleneck_attn=config.bottleneck_attn,
+        attn_heads=config.attn_heads,
         out_channels=config.out_channels,
         in_channels=config.in_channels,
     )

@@ -46,6 +46,10 @@ class Config:
     # Asymmetric Wavelet Skip (AWS) — used when wavelet_fusion='asym' (our contribution)
     aws_use_gate: bool = True         # vessel-suppression gate from the oriented HF bands
     aws_symmetric: bool = False       # True = enhance/reconstruct ALL bands (the "fixed H5" control)
+    # Deep-supervision placement + bottleneck wavelet attention (WA family)
+    deepsup_indices: Tuple[int, ...] = ()   # which wavelet skips get aux heads (empty = all selected)
+    bottleneck_attn: bool = False           # wavelet self-attention on the bottleneck (FP suppression)
+    attn_heads: int = 4
 
     # --- Training ---
     batch_size: int = 4                     # EfficientNet-B4 @ 512x512 needs ~3GB/sample
@@ -385,6 +389,42 @@ EXPERIMENTS: dict[str, Config] = {
         wavelet_family='haar', wavelet_level=1,
         wavelet_skip_indices=(0, 1, 2, 3),
         wavelet_fusion='asym_ms',
+    ),
+
+    # ── H2L1A incrementado: deep-sup wavelet + atenção global wavelet ────────
+    # H2L1A (melhor wavelet: passivo, all-skips, L1, +LL) ganha do baseline mas perde pro W0 por
+    # ~1% (supressão de FP). O ganho do W0 vem de deep-sup + contexto global, não do skip. Aqui,
+    # sobre a MESMA base H2L1A: (WA_ds) deep-sup só nas skips grossas (conserta o H7 que supervisava
+    # todas); (WA_at) self-attention wavelet no bottleneck (FP=vaso=longo alcance); (WA) os dois.
+    'WA_ds': Config(
+        exp_id='WA_ds', exp_name='h2l1a_deepsup_coarse',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+        deep_supervision=True,
+        deepsup_indices=(2, 3),             # só skips grossas (64² e 32²), sem o ruído das rasas
+    ),
+    'WA_at': Config(
+        exp_id='WA_at', exp_name='h2l1a_wavelet_attn',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+        bottleneck_attn=True,
+    ),
+    'WA': Config(
+        exp_id='WA', exp_name='h2l1a_deepsup_attn',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_include_ll=True,
+        deep_supervision=True,
+        deepsup_indices=(2, 3),
+        bottleneck_attn=True,
     ),
 
     # ── Wavelet WITHOUT pretraining, hemorrhage-only ─────────────────────────
