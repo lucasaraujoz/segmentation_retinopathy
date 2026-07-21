@@ -72,6 +72,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--iters', type=int, default=MAX_ITERS)
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
+    parser.add_argument('--accum', type=int, default=1,
+                        help='Gradient accumulation steps. Effective batch = '
+                             'batch_size * accum. Use --batch-size 2 --accum 2 '
+                             'to reproduce the paper batch of 4 on a 16GB GPU.')
     parser.add_argument('--lr', type=float, default=BASE_LR)
     parser.add_argument('--out-dir', type=str, default='outputs/repro_wfdenet_idrid')
     parser.add_argument('--workers', type=int, default=4)
@@ -140,26 +144,33 @@ def main() -> None:
 
     model.train()
     running, t0 = 0.0, time.time()
-    print(f'\ntraining {args.iters} iters, batch {args.batch_size}, '
+    eff_batch = args.batch_size * args.accum
+    print(f'\ntraining {args.iters} iters, batch {args.batch_size}'
+          f'{f" x accum {args.accum} = eff {eff_batch}" if args.accum > 1 else ""}, '
           f'SGD lr={args.lr} poly^{POLY_POWER}\n')
 
     for it in range(1, args.iters + 1):
+        # One iteration == one optimizer step == one point on the poly LR curve,
+        # regardless of accumulation. accum micro-batches make up the effective
+        # batch, so the schedule stays identical to the paper's 40k iters.
         lr = poly_lr(args.lr, it - 1, args.iters)
         for g in optimizer.param_groups:
             g['lr'] = lr
 
-        batch = next(batches)
-        images = batch['image'].to(device, non_blocking=True)
-        masks = batch['mask'].to(device, non_blocking=True)
-
-        outputs = model(images)
-        loss, parts = criterion(outputs, masks)
-
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        step_loss = 0.0
+        for _ in range(args.accum):
+            batch = next(batches)
+            images = batch['image'].to(device, non_blocking=True)
+            masks = batch['mask'].to(device, non_blocking=True)
+
+            outputs = model(images)
+            loss, parts = criterion(outputs, masks)
+            (loss / args.accum).backward()     # average grads over micro-batches
+            step_loss += loss.item() / args.accum
         optimizer.step()
 
-        running += loss.item()
+        running += step_loss
 
         if it % args.log_interval == 0:
             avg = running / args.log_interval
