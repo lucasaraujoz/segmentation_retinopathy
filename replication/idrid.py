@@ -106,8 +106,14 @@ class IDRiDDataset(Dataset):
             p = self._mask_path(stem, cls)
             if p.exists():
                 m = np.array(Image.open(p))
-                if m.ndim == 3:                       # defensive: RGB-encoded mask
-                    m = m.max(axis=-1)
+                if m.ndim == 3:
+                    # Almost every GT file is palette mode, but IDRiD_81_EX.tif
+                    # ships as RGBA. Its alpha channel is 255 everywhere, so a
+                    # max() over all four channels marks the entire image as
+                    # lesion -- which silently wrecks the aggregated EX scores
+                    # (that one image was 79% of all EX ground-truth pixels in
+                    # the test set). Drop alpha and keep only the colour planes.
+                    m = m[..., :3].max(axis=-1)
                 channels.append((m > 0).astype(np.uint8))
             else:
                 channels.append(np.zeros(shape, dtype=np.uint8))
