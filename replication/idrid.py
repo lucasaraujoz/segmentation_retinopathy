@@ -56,6 +56,33 @@ IDRID_STD = (80.206, 41.232, 13.293)
 # size=(960, 1440), i.e. (H, W).
 CROP_H, CROP_W = 960, 1440
 
+# Training multi-scale, following the M2MRF config the paper cites for the
+# resize (fcn_hr48-M2MRF-C_40k_idrid_bdice.py):
+#     Resize(img_scale=(1440,960), ratio_range=(0.5,2.0), keep_ratio=True)
+# mmcv.imrescale keeps aspect, so for the uniform 2848x4288 IDRiD images the
+# per-ratio output size is deterministic: scale_factor = 0.3358 * r, giving
+# r=0.5 -> 478x720, r=1.0 -> 956x1440, r=2.0 -> 1913x2880. It is ALWAYS a
+# downscale of the native detail -- never an upscale.
+RATIO_RANGE = (0.5, 2.0)
+
+# We cache each training image once at the r=2.0 target (the largest size any
+# ratio needs) and realise the random scale as a downscale from there. Aspect
+# 1913/2880 = 0.6642 matches the native 2848/4288, so no distortion.
+HI_H, HI_W = 1913, 2880
+
+# RandomScale multiplies the *cached* size. Since the cache is the r=2.0 image,
+# reproducing ratio r means multiplying by r/2, i.e. a factor in [0.25, 1.0].
+# albumentations samples the factor uniformly, matching mmseg's uniform-in-r.
+_SCALE_LIMIT = (RATIO_RANGE[0] / RATIO_RANGE[1] - 1.0,   # 0.5/2 - 1 = -0.75
+                RATIO_RANGE[1] / RATIO_RANGE[1] - 1.0)   # 2/2   - 1 =  0.0
+
+# albumentations 2.0 renamed PadIfNeeded's fill arguments (value/mask_value ->
+# fill/fill_mask). The wrong pair is only a UserWarning, silently falling back
+# to defaults, so select by version and keep the pad value explicit on both.
+_PAD_FILL = ({'fill': 0, 'fill_mask': 0}
+             if int(A.__version__.split('.')[0]) >= 2
+             else {'value': 0, 'mask_value': 0})
+
 
 class IDRiDDataset(Dataset):
     def __init__(self, split: str = 'train', root: Path = IDRID_ROOT,
@@ -74,21 +101,26 @@ class IDRiDDataset(Dataset):
 
         self.gt_dir = self.root / '2. All Segmentation Groundtruths' / _SPLIT_DIRS[split]
         self.cache = cache
+        # Train caches at the r=2.0 high-res target so the random scale is a real
+        # downscale; test caches directly at the final 960x1440 (no scale aug).
+        self.cache_h, self.cache_w = (HI_H, HI_W) if self.is_train else (CROP_H, CROP_W)
         self.transform = build_transform(self.is_train, include_base_resize=not cache)
         self._cache: List[Tuple[np.ndarray, np.ndarray]] = []
         if cache:
             self._build_cache()
 
     def _build_cache(self) -> None:
-        """Pre-decode every image/mask once, resized to the 960x1440 base scale.
+        """Pre-decode every image/mask once at the cache resolution.
 
-        This is exactly the A.Resize step that would otherwise run per sample
-        (linear for the image, nearest for the mask, as albumentations does),
-        so it changes nothing numerically -- all augmentation happens after it.
-        It just avoids re-decoding a 12MP JPEG plus four 12MP TIFs on every
-        one of 40k iterations. Costs ~520MB RAM for the 54 training images.
+        Train: 1913x2880 (the r=2.0 target) so the per-sample RandomScale only
+        ever downscales real detail -- caching at 960x1440 and scaling up was
+        the bug that blurred the tiny MA/SE lesions. Test: 960x1440, the final
+        inference size. Resize is linear for the image, nearest for the mask
+        (albumentations default), matching mmcv. Avoids re-decoding a 12MP JPEG
+        plus four 12MP TIFs on every one of 40k iterations.
+        Cost: ~38MB/sample x 54 ~= 2.1GB (train); ~260MB (test).
         """
-        base = A.Resize(CROP_H, CROP_W)
+        base = A.Resize(self.cache_h, self.cache_w)
         for path in self.images:
             image, mask = self._read_raw(path)
             out = base(image=image, mask=mask)
@@ -142,41 +174,62 @@ class IDRiDDataset(Dataset):
 
 
 def build_transform(is_train: bool, include_base_resize: bool = True) -> A.Compose:
-    """Paper §4.2.2: rotation (90/180/270), flipping (h/v), multi-scaling
-    (0.5-2.0), then the image is resized to 1440x960.
+    """Replicates the M2MRF/mmseg train_pipeline the WFDENet paper cites.
 
-    Read literally, a fixed resize after random scaling would cancel the
-    scaling out. The authors' data_preprocessor carries size=(960,1440) with
-    pad_val/seg_pad_val, which only makes sense with the standard
-    mmseg/M2MRF recipe, equivalent to mmseg's
-        Resize(scale=(1440,960), ratio_range=(0.5,2.0)) -> RandomCrop(960,1440)
-    Note the random scale is applied to the *1440x960 base scale*, not to the
-    native 2848x4288 image -- otherwise every crop would be a native-resolution
-    close-up, which contradicts "resized to 1440x960".
+    Reference (fcn_hr48-M2MRF-C_40k_idrid_bdice.py):
+        Resize(img_scale=(1440,960), ratio_range=(0.5,2.0))   # downscale of the ORIGINAL
+        RandomCrop(crop_size=(960,1440), cat_max_ratio=0.75)  # near-noop here, omitted
+        RandomFlip(flip_ratio=0)                              # flips/rot are OFFLINE, 6x
+        PhotoMetricDistortion()
+        Normalize(**img_norm_cfg)                             # BEFORE pad
+        Pad(size=crop_size, pad_val=0, seg_pad_val=0)
+
+    Four things this fixes vs. the previous version (see plan Iteracao 2):
+      1. RandomScale runs on the r=2.0 cache (a real downscale of the 4288-wide
+         original), not on a pre-shrunk 960x1440 image that upscaling would blur.
+         _SCALE_LIMIT maps the factor to [0.25, 1.0], reproducing ratio 0.5-2.0.
+      2. Normalize before Pad, so the padded border is 0 in normalised space =
+         the dataset mean colour, not black (-1.45 sigma).
+      3. ColorJitter approximates PhotoMetricDistortion (brightness/contrast/
+         saturation/hue).
+      4. Pad position 'top_left' matches mmseg's crop-then-pad placement (image
+         top-left, border bottom-right); we pad-then-crop because albumentations
+         RandomCrop requires image >= crop.
+
+    Documented approximations: ColorJitter's brightness is multiplicative vs
+    PMD's additive; the r<2 downscale starts from the 2880 cache, not the 4288
+    native (negligible antialiasing difference); online flips/rot cover the same
+    symmetry set as the offline 6x; cat_max_ratio omitted.
 
     Normalisation runs on the raw 0-255 values (max_pixel_value=1.0), matching
     mmseg's SegDataPreProcessor, whose mean/std are on the 0-255 scale.
     """
     normalize = A.Normalize(mean=IDRID_MEAN, std=IDRID_STD, max_pixel_value=1.0)
-    # Skipped when the dataset caches its samples already at the base scale.
-    base = [A.Resize(CROP_H, CROP_W)] if include_base_resize else []
 
     if not is_train:
+        # Test: resize to the 960x1440 inference size. Skipped when the dataset
+        # already cached at that size.
+        base = [A.Resize(CROP_H, CROP_W)] if include_base_resize else []
         return A.Compose([*base, normalize, ToTensorV2()])
 
+    # Without a cache the sample arrives native (2848x4288); bring it to the
+    # r=2.0 base first so the scale factor means the same thing.
+    base = [A.Resize(HI_H, HI_W)] if include_base_resize else []
+
     return A.Compose([
-        *base,                                          # base scale 1440x960
-        A.RandomScale(scale_limit=(-0.5, 1.0), p=1.0),  # ratio_range 0.5-2.0
-        # Rotation/flips come before the crop: a 90/270 rotation transposes the
-        # image, and the crop is the only step that guarantees a fixed
-        # 960x1440 output for batch collation.
+        *base,
+        A.RandomScale(scale_limit=_SCALE_LIMIT, p=1.0),   # ratio 0.5-2.0 as downscale
+        # Flips/rotation before the crop: a 90/270 rotation transposes the image,
+        # and the crop is what pins the output to a fixed 960x1440 for collation.
         A.RandomRotate90(p=1.0),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
-        A.PadIfNeeded(min_height=CROP_H, min_width=CROP_W,
-                      border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+        A.ColorJitter(brightness=0.125, contrast=(0.5, 1.5),
+                      saturation=(0.5, 1.5), hue=0.05, p=1.0),   # ~ PhotoMetricDistortion
+        normalize,                                        # BEFORE pad
+        A.PadIfNeeded(min_height=CROP_H, min_width=CROP_W, position='top_left',
+                      border_mode=cv2.BORDER_CONSTANT, **_PAD_FILL),
         A.RandomCrop(height=CROP_H, width=CROP_W),
-        normalize,
         ToTensorV2(),
     ])
 
