@@ -13,6 +13,17 @@ Two traps, both verified:
     channel -- not a reason to drop the image.
 
 The official split is fixed: 54 train / 27 test, no validation set.
+
+Augmentation = paper §4.2.2 exactly: rotation (90/180/270), flipping (h/v),
+multi-scaling (0.5-2.0), then crop to 960x1440. NO photometric distortion (the
+paper lists only those three techniques). This is the e1f2f3b baseline (best,
+mDice 63.63) plus ONE change (D1): the multi-scale runs on the NATIVE 2848x4288
+image -- a real downscale of native detail -- instead of on a pre-shrunk
+960x1440 image that upscaling would blur. Grounded in M2MRF (paper's [7]):
+tools/prepare_labels.py does NOT resize, so mmseg's
+Resize(img_scale=(1440,960), ratio_range=(0.5,2.0)) rescales the native image.
+Everything else (pad-then-normalize order, flips, crop) is kept identical to
+e1f2f3b so this is a single-variable experiment isolating the detail question.
 """
 
 import argparse
@@ -56,29 +67,34 @@ IDRID_STD = (80.206, 41.232, 13.293)
 # size=(960, 1440), i.e. (H, W).
 CROP_H, CROP_W = 960, 1440
 
-# Training multi-scale, following the M2MRF config the paper cites for the
-# resize (fcn_hr48-M2MRF-C_40k_idrid_bdice.py):
-#     Resize(img_scale=(1440,960), ratio_range=(0.5,2.0), keep_ratio=True)
-# mmcv.imrescale keeps aspect, so for the uniform 2848x4288 IDRiD images the
-# per-ratio output size is deterministic: scale_factor = 0.3358 * r, giving
-# r=0.5 -> 478x720, r=1.0 -> 956x1440, r=2.0 -> 1913x2880. It is ALWAYS a
-# downscale of the native detail -- never an upscale.
-RATIO_RANGE = (0.5, 2.0)
+# All 81 IDRiD images are exactly this size (verified). mmcv keep-ratio resize
+# is therefore deterministic per ratio, so a fixed RandomScale factor on the
+# native image reproduces it exactly.
+NATIVE_H, NATIVE_W = 2848, 4288
+_IMG_SCALE = (1440, 960)       # mmseg img_scale (W, H)
+_RATIO_RANGE = (0.5, 2.0)
 
-# We cache each training image once at the r=2.0 target (the largest size any
-# ratio needs) and realise the random scale as a downscale from there. Aspect
-# 1913/2880 = 0.6642 matches the native 2848/4288, so no distortion.
-HI_H, HI_W = 1913, 2880
 
-# RandomScale multiplies the *cached* size. Since the cache is the r=2.0 image,
-# reproducing ratio r means multiplying by r/2, i.e. a factor in [0.25, 1.0].
-# albumentations samples the factor uniformly, matching mmseg's uniform-in-r.
-_SCALE_LIMIT = (RATIO_RANGE[0] / RATIO_RANGE[1] - 1.0,   # 0.5/2 - 1 = -0.75
-                RATIO_RANGE[1] / RATIO_RANGE[1] - 1.0)   # 2/2   - 1 =  0.0
+def _mmcv_scale_factor(ratio: float) -> float:
+    """mmcv.imrescale scale_factor for target (1440*r, 960*r) on the native
+    image, keeping aspect ratio (edge-based, like mmcv)."""
+    long_edge = max(_IMG_SCALE) * ratio
+    short_edge = min(_IMG_SCALE) * ratio
+    return min(long_edge / max(NATIVE_H, NATIVE_W),
+               short_edge / min(NATIVE_H, NATIVE_W))
+
+
+# RandomScale multiplies the native size by (1 + limit). We want the output to
+# match mmcv's ratio-r size, i.e. factor = scale_factor(r). Since scale_factor
+# is linear in r, uniform-in-factor == uniform-in-r (matching mmseg).
+#   r=0.5 -> factor 0.168 -> 478x720   r=1 -> 0.336 -> 956x1440   r=2 -> 0.672 -> 1913x2880
+_NATIVE_SCALE_LIMIT = (_mmcv_scale_factor(_RATIO_RANGE[0]) - 1.0,
+                       _mmcv_scale_factor(_RATIO_RANGE[1]) - 1.0)
 
 # albumentations 2.0 renamed PadIfNeeded's fill arguments (value/mask_value ->
 # fill/fill_mask). The wrong pair is only a UserWarning, silently falling back
 # to defaults, so select by version and keep the pad value explicit on both.
+# Pad value 0 (raw black, applied BEFORE Normalize) matches e1f2f3b.
 _PAD_FILL = ({'fill': 0, 'fill_mask': 0}
              if int(A.__version__.split('.')[0]) >= 2
              else {'value': 0, 'mask_value': 0})
@@ -101,30 +117,30 @@ class IDRiDDataset(Dataset):
 
         self.gt_dir = self.root / '2. All Segmentation Groundtruths' / _SPLIT_DIRS[split]
         self.cache = cache
-        # Train caches at the r=2.0 high-res target so the random scale is a real
-        # downscale; test caches directly at the final 960x1440 (no scale aug).
-        self.cache_h, self.cache_w = (HI_H, HI_W) if self.is_train else (CROP_H, CROP_W)
         self.transform = build_transform(self.is_train, include_base_resize=not cache)
         self._cache: List[Tuple[np.ndarray, np.ndarray]] = []
         if cache:
             self._build_cache()
 
     def _build_cache(self) -> None:
-        """Pre-decode every image/mask once at the cache resolution.
+        """Pre-decode every image/mask once to avoid re-reading a 12MP JPEG plus
+        four 12MP TIFs on every one of 40k iterations.
 
-        Train: 1913x2880 (the r=2.0 target) so the per-sample RandomScale only
-        ever downscales real detail -- caching at 960x1440 and scaling up was
-        the bug that blurred the tiny MA/SE lesions. Test: 960x1440, the final
-        inference size. Resize is linear for the image, nearest for the mask
-        (albumentations default), matching mmcv. Avoids re-decoding a 12MP JPEG
-        plus four 12MP TIFs on every one of 40k iterations.
-        Cost: ~38MB/sample x 54 ~= 2.1GB (train); ~260MB (test).
+        Train keeps NATIVE 2848x4288 so the multi-scale is a true downscale of
+        real detail (the D1 fix). Test caches at the final 960x1440 inference
+        size (no scale aug there). Native cache costs ~85MB/sample x 54 ~= 4.6GB;
+        with spawn each worker copies it, so prefer --workers 0 (single copy) or
+        keep worker count low.
         """
-        base = A.Resize(self.cache_h, self.cache_w)
-        for path in self.images:
-            image, mask = self._read_raw(path)
-            out = base(image=image, mask=mask)
-            self._cache.append((out['image'], out['mask']))
+        if self.is_train:
+            for path in self.images:
+                self._cache.append(self._read_raw(path))
+        else:
+            base = A.Resize(CROP_H, CROP_W)
+            for path in self.images:
+                image, mask = self._read_raw(path)
+                out = base(image=image, mask=mask)
+                self._cache.append((out['image'], out['mask']))
 
     def __len__(self) -> int:
         return len(self.images)
@@ -174,62 +190,41 @@ class IDRiDDataset(Dataset):
 
 
 def build_transform(is_train: bool, include_base_resize: bool = True) -> A.Compose:
-    """Replicates the M2MRF/mmseg train_pipeline the WFDENet paper cites.
+    """Paper §4.2.2: rotation (90/180/270), flipping (h/v), multi-scaling
+    (0.5-2.0), then crop to 960x1440. No photometric augmentation.
 
-    Reference (fcn_hr48-M2MRF-C_40k_idrid_bdice.py):
-        Resize(img_scale=(1440,960), ratio_range=(0.5,2.0))   # downscale of the ORIGINAL
-        RandomCrop(crop_size=(960,1440), cat_max_ratio=0.75)  # near-noop here, omitted
-        RandomFlip(flip_ratio=0)                              # flips/rot are OFFLINE, 6x
-        PhotoMetricDistortion()
-        Normalize(**img_norm_cfg)                             # BEFORE pad
-        Pad(size=crop_size, pad_val=0, seg_pad_val=0)
+    D1 (vs e1f2f3b): the RandomScale runs on the NATIVE image, so ratio 2.0 is a
+    real 0.67x downscale of the 4288-wide original (sharp), not a 2x upscale of a
+    960x1440 image (blurred). _NATIVE_SCALE_LIMIT reproduces mmcv's per-ratio
+    output sizes. For a fundus image the tiny lesions (MA ~5px) only survive if
+    they are downsampled from native rather than interpolated up.
 
-    Four things this fixes vs. the previous version (see plan Iteracao 2):
-      1. RandomScale runs on the r=2.0 cache (a real downscale of the 4288-wide
-         original), not on a pre-shrunk 960x1440 image that upscaling would blur.
-         _SCALE_LIMIT maps the factor to [0.25, 1.0], reproducing ratio 0.5-2.0.
-      2. Normalize before Pad, so the padded border is 0 in normalised space =
-         the dataset mean colour, not black (-1.45 sigma).
-      3. ColorJitter approximates PhotoMetricDistortion (brightness/contrast/
-         saturation/hue).
-      4. Pad position 'top_left' matches mmseg's crop-then-pad placement (image
-         top-left, border bottom-right); we pad-then-crop because albumentations
-         RandomCrop requires image >= crop.
-
-    Documented approximations: ColorJitter's brightness is multiplicative vs
-    PMD's additive; the r<2 downscale starts from the 2880 cache, not the 4288
-    native (negligible antialiasing difference); online flips/rot cover the same
-    symmetry set as the offline 6x; cat_max_ratio omitted.
-
-    Normalisation runs on the raw 0-255 values (max_pixel_value=1.0), matching
-    mmseg's SegDataPreProcessor, whose mean/std are on the 0-255 scale.
+    Everything else matches e1f2f3b: pad (raw 0) THEN normalize, online
+    flips/rot90 (same symmetry set as M2MRF's offline 6x). Normalisation runs on
+    the raw 0-255 values (max_pixel_value=1.0), matching mmseg's
+    SegDataPreProcessor, whose mean/std are on the 0-255 scale.
     """
     normalize = A.Normalize(mean=IDRID_MEAN, std=IDRID_STD, max_pixel_value=1.0)
 
     if not is_train:
-        # Test: resize to the 960x1440 inference size. Skipped when the dataset
-        # already cached at that size.
+        # Test: resize to the 960x1440 inference size (unless already cached).
         base = [A.Resize(CROP_H, CROP_W)] if include_base_resize else []
         return A.Compose([*base, normalize, ToTensorV2()])
 
-    # Without a cache the sample arrives native (2848x4288); bring it to the
-    # r=2.0 base first so the scale factor means the same thing.
-    base = [A.Resize(HI_H, HI_W)] if include_base_resize else []
-
+    # Train input is always native 2848x4288 (cached raw, or read raw); the
+    # multi-scale itself produces the 960x1440-scale crops.
     return A.Compose([
-        *base,
-        A.RandomScale(scale_limit=_SCALE_LIMIT, p=1.0),   # ratio 0.5-2.0 as downscale
-        # Flips/rotation before the crop: a 90/270 rotation transposes the image,
-        # and the crop is what pins the output to a fixed 960x1440 for collation.
+        A.RandomScale(scale_limit=_NATIVE_SCALE_LIMIT, p=1.0),   # ratio 0.5-2.0 on native
+        # Rotation/flips before the crop: a 90/270 rotation transposes the
+        # image, and the crop is the only step that guarantees a fixed
+        # 960x1440 output for batch collation.
         A.RandomRotate90(p=1.0),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
-        A.ColorJitter(brightness=0.125, contrast=(0.5, 1.5),
-                      saturation=(0.5, 1.5), hue=0.05, p=1.0),   # ~ PhotoMetricDistortion
-        normalize,                                        # BEFORE pad
-        A.PadIfNeeded(min_height=CROP_H, min_width=CROP_W, position='top_left',
+        A.PadIfNeeded(min_height=CROP_H, min_width=CROP_W,
                       border_mode=cv2.BORDER_CONSTANT, **_PAD_FILL),
         A.RandomCrop(height=CROP_H, width=CROP_W),
+        normalize,
         ToTensorV2(),
     ])
 
@@ -254,7 +249,6 @@ def inspect() -> None:
         print('  positive pixels per class:',
               {c: int(mask[i].sum()) for i, c in enumerate(CLASSES)})
 
-        # aggregate lesion prevalence, useful to sanity-check class imbalance
         totals = np.zeros(len(CLASSES))
         for i in range(len(ds)):
             m = ds[i]['mask']

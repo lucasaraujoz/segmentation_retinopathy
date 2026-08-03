@@ -55,14 +55,39 @@ def infinite_loader(loader):
             yield batch
 
 
+def _assert_masks_sane(dataset, max_fraction: float = 0.30) -> None:
+    """Fail loudly if any ground-truth channel covers an implausible area.
+
+    IDRiD_81_EX.tif ships as RGBA while every other file is palette mode; if its
+    alpha channel leaks into the mask, that one image is labelled 100% lesion
+    and, because metrics are dataset-aggregated, it silently destroys the EX
+    scores. No real lesion covers a third of the retina, so anything above
+    max_fraction means the masks are being decoded wrong.
+    """
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        frac = sample['mask'].flatten(1).mean(1)
+        for j, cls in enumerate(dataset.classes):
+            if frac[j] > max_fraction:
+                raise RuntimeError(
+                    f'{sample["filename"]}: {cls} mask covers '
+                    f'{frac[j] * 100:.1f}% of the image (limit '
+                    f'{max_fraction * 100:.0f}%). The masks are being decoded '
+                    f'incorrectly -- check the RGBA handling in '
+                    f'IDRiDDataset._load_mask.'
+                )
+
+
 @torch.no_grad()
-def evaluate(model, loader, device, keep_probs: bool = True) -> dict:
+def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False) -> dict:
     model.eval()
     evaluator = SegEvaluator(CLASSES, keep_probs=keep_probs)
     for batch in loader:
         images = batch['image'].to(device, non_blocking=True)
         masks = batch['mask'].to(device, non_blocking=True)
-        logits = model(images)          # eval mode -> single tensor
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+            logits = model(images)      # eval mode -> single tensor
+        logits = logits.float()
         evaluator.update(logits, masks)
     model.train()
     return evaluator.compute()
@@ -86,6 +111,10 @@ def main() -> None:
     parser.add_argument('--ckpt-interval', type=int, default=10000)
     parser.add_argument('--no-pretrained', action='store_true',
                         help='Skip ImageNet weights for the backbone.')
+    parser.add_argument('--amp', action='store_true',
+                        help='bf16 autocast so batch 4 fits a 16GB GPU. CCFAM '
+                             'stays fp32 (its own autocast(False)); bf16 needs '
+                             'no GradScaler. Small precision deviation vs fp32.')
     parser.add_argument('--eval-only', action='store_true')
     parser.add_argument('--ckpt', type=str, default=None)
     parser.add_argument('--seed', type=int, default=0)
@@ -99,6 +128,7 @@ def main() -> None:
     train_ds = IDRiDDataset('train')
     test_ds = IDRiDDataset('test')
     print(f'IDRiD: {len(train_ds)} train / {len(test_ds)} test | classes {CLASSES}')
+    _assert_masks_sane(test_ds)
 
     # spawn, not fork: forked workers deadlock against OpenCV/torch thread
     # pools (same reason train.py:258 does this).
@@ -121,7 +151,7 @@ def main() -> None:
         print(f'loaded checkpoint {args.ckpt}')
 
     if args.eval_only:
-        results = evaluate(model, test_loader, device)
+        results = evaluate(model, test_loader, device, amp=args.amp)
         print('\n' + format_comparison(results))
         (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
         return
@@ -146,7 +176,8 @@ def main() -> None:
     running, t0 = 0.0, time.time()
     eff_batch = args.batch_size * args.accum
     print(f'\ntraining {args.iters} iters, batch {args.batch_size}'
-          f'{f" x accum {args.accum} = eff {eff_batch}" if args.accum > 1 else ""}, '
+          f'{f" x accum {args.accum} = eff {eff_batch}" if args.accum > 1 else ""}'
+          f'{" bf16-amp" if args.amp else ""}, '
           f'SGD lr={args.lr} poly^{POLY_POWER}\n')
 
     for it in range(1, args.iters + 1):
@@ -164,8 +195,11 @@ def main() -> None:
             images = batch['image'].to(device, non_blocking=True)
             masks = batch['mask'].to(device, non_blocking=True)
 
-            outputs = model(images)
-            loss, parts = criterion(outputs, masks)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
+                                enabled=args.amp):
+                outputs = model(images)
+                loss, parts = criterion(outputs, masks)
+            # bf16 has fp32 dynamic range, so no GradScaler is needed.
             (loss / args.accum).backward()     # average grads over micro-batches
             step_loss += loss.item() / args.accum
         optimizer.step()
@@ -190,7 +224,7 @@ def main() -> None:
                 ])
 
         if args.eval_interval and it % args.eval_interval == 0 and it < args.iters:
-            r = evaluate(model, test_loader, device, keep_probs=False)
+            r = evaluate(model, test_loader, device, keep_probs=False, amp=args.amp)
             print(f'  [monitor @ {it}] mAUPR {r["mAUPR"]:.2f}  '
                   f'mDice {r["mDice"]:.2f}  mIoU {r["mIoU"]:.2f}', flush=True)
 
@@ -202,7 +236,7 @@ def main() -> None:
     torch.save({'iter': args.iters, 'model': model.state_dict()}, final_ckpt)
 
     print('\n=== final model, IDRiD test set (27 images) ===')
-    results = evaluate(model, test_loader, device)
+    results = evaluate(model, test_loader, device, amp=args.amp)
     print(format_comparison(results))
     (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
     print(f'\nsaved {final_ckpt} and {out_dir / "test_results.json"}')
