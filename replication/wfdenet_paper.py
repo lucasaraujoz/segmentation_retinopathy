@@ -54,14 +54,32 @@ class EfficientNetB1Features(nn.Module):
     features_only ([16,24,40,112,320]) matches: level 5 must come from the
     1280-channel head conv, not from the last block. So we drive the full timm
     model by hand. Block->channel mapping verified against timm 1.0.27.
+
+    Variant matters. The authors ship their own backbone
+    (mmseg/models/backbones/efficientnet.py) whose defaults are
+
+        conv_cfg = dict(type='Conv2dAdaptivePadding')   # TensorFlow SAME padding
+        norm_cfg = dict(type='BN', eps=1e-3)
+
+    timm's plain `efficientnet_b1` uses symmetric (1,1) padding and eps 1e-5 --
+    a real mismatch. `tf_efficientnet_b1` uses Conv2dSame and eps 1e-3, and its
+    weights come from the same TensorFlow checkpoint conversion mmpretrain's
+    3rdparty weights do, so it is the closest available match (NOT provably the
+    identical file -- the released config carries no checkpoint reference, as
+    it is an inference-only release).
+
+    Both variants give an identical 5-level structure and identical parameter
+    counts (7,794,184), so the full model stays at 9,511,764 = the paper's 9.51M.
     """
 
     out_channels = (16, 24, 40, 112, 1280)
 
-    def __init__(self, pretrained: bool = True):
+    def __init__(self, pretrained: bool = True,
+                 variant: str = 'tf_efficientnet_b1.in1k'):
         super().__init__()
+        self.variant = variant
         net = timm.create_model(
-            'efficientnet_b1', pretrained=pretrained, drop_path_rate=0.0
+            variant, pretrained=pretrained, drop_path_rate=0.0
         )
         self.conv_stem = net.conv_stem
         self.bn1 = net.bn1                      # timm BatchNormAct2d: BN + act
@@ -451,13 +469,16 @@ class WFDENetPaper(nn.Module):
     def __init__(self, num_classes: int = 4, channels: int = 64,
                  in_channels: Tuple[int, ...] = (16, 24, 40, 112, 1280),
                  align_corners: bool = False, bias: bool = True,
-                 pretrained: bool = True):
+                 pretrained: bool = True,
+                 backbone_variant: str = 'tf_efficientnet_b1.in1k'):
         super().__init__()
         self.num_classes = num_classes
         self.channels = channels
         self.align_corners = align_corners
 
-        self.backbone = EfficientNetB1Features(pretrained=pretrained)
+        self.backbone = EfficientNetB1Features(
+            pretrained=pretrained, variant=backbone_variant
+        )
 
         # Two convs per level to unify channels to C=64 (§3.1).
         # First is a bare 1x1 (no norm, no act), second is 3x3 + BN + ReLU.
@@ -542,5 +563,10 @@ class WFDENetPaper(nn.Module):
         return main, aux_h, aux_l
 
 
-def build_wfdenet_paper(num_classes: int = 4, pretrained: bool = True) -> WFDENetPaper:
-    return WFDENetPaper(num_classes=num_classes, pretrained=pretrained)
+def build_wfdenet_paper(num_classes: int = 4, pretrained: bool = True,
+                        backbone_variant: str = 'tf_efficientnet_b1.in1k'
+                        ) -> WFDENetPaper:
+    """backbone_variant: 'tf_efficientnet_b1.in1k' matches the authors' TF-SAME
+    padding + BN eps 1e-3; 'efficientnet_b1' is the earlier (mismatched) run."""
+    return WFDENetPaper(num_classes=num_classes, pretrained=pretrained,
+                        backbone_variant=backbone_variant)

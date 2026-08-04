@@ -103,7 +103,7 @@ _PAD_FILL = ({'fill': 0, 'fill_mask': 0}
 class IDRiDDataset(Dataset):
     def __init__(self, split: str = 'train', root: Path = IDRID_ROOT,
                  classes: Tuple[str, ...] = CLASSES, is_train: bool = None,
-                 cache: bool = True):
+                 cache: bool = True, photometric: bool = False):
         assert split in _SPLIT_DIRS, f'unknown split {split!r}'
         self.split = split
         self.root = Path(root)
@@ -117,7 +117,9 @@ class IDRiDDataset(Dataset):
 
         self.gt_dir = self.root / '2. All Segmentation Groundtruths' / _SPLIT_DIRS[split]
         self.cache = cache
-        self.transform = build_transform(self.is_train, include_base_resize=not cache)
+        self.transform = build_transform(self.is_train,
+                                         include_base_resize=not cache,
+                                         photometric=photometric)
         self._cache: List[Tuple[np.ndarray, np.ndarray]] = []
         if cache:
             self._build_cache()
@@ -189,9 +191,19 @@ class IDRiDDataset(Dataset):
         }
 
 
-def build_transform(is_train: bool, include_base_resize: bool = True) -> A.Compose:
+def build_transform(is_train: bool, include_base_resize: bool = True,
+                    photometric: bool = False) -> A.Compose:
     """Paper §4.2.2: rotation (90/180/270), flipping (h/v), multi-scaling
     (0.5-2.0), then crop to 960x1440. No photometric augmentation.
+
+    photometric=True is a DELIBERATE DEVIATION from the paper, off by default.
+    The paper states verbatim: "we use three data augmentation techniques
+    including rotation (90, 180, and 270), flipping (horizontal and vertical),
+    and multi-scaling (0.5-2.0)" -- three, enumerated, no colour jitter. The
+    counter-argument is that M2MRF (ref [7], cited by the paper for the resize)
+    does run PhotoMetricDistortion in its train_pipeline, and the WFDENet repo
+    publishes no training pipeline at all to settle it. So the flag exists to
+    test that hypothesis, never as the faithful default.
 
     D1 (vs e1f2f3b): the RandomScale runs on the NATIVE image, so ratio 2.0 is a
     real 0.67x downscale of the 4288-wide original (sharp), not a 2x upscale of a
@@ -224,6 +236,12 @@ def build_transform(is_train: bool, include_base_resize: bool = True) -> A.Compo
         A.PadIfNeeded(min_height=CROP_H, min_width=CROP_W,
                       border_mode=cv2.BORDER_CONSTANT, **_PAD_FILL),
         A.RandomCrop(height=CROP_H, width=CROP_W),
+        # Off by default -- see the docstring. Approximates mmseg's
+        # PhotoMetricDistortion (whose brightness is additive +-32, not
+        # multiplicative, so this is close but not identical).
+        *([A.ColorJitter(brightness=0.125, contrast=(0.5, 1.5),
+                         saturation=(0.5, 1.5), hue=0.05, p=1.0)]
+          if photometric else []),
         normalize,
         ToTensorV2(),
     ])

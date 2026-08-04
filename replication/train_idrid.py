@@ -115,6 +115,14 @@ def main() -> None:
                         help='bf16 autocast so batch 4 fits a 16GB GPU. CCFAM '
                              'stays fp32 (its own autocast(False)); bf16 needs '
                              'no GradScaler. Small precision deviation vs fp32.')
+    parser.add_argument('--backbone', type=str, default='tf_efficientnet_b1.in1k',
+                        help="timm variant. Default matches the authors' backbone "
+                             '(TF SAME padding + BN eps 1e-3). Use '
+                             "'efficientnet_b1' to reproduce the earlier runs.")
+    parser.add_argument('--photometric', action='store_true',
+                        help='DEVIATION from the paper (which lists three '
+                             'augmentations, none photometric): add colour jitter '
+                             "approximating M2MRF's PhotoMetricDistortion.")
     parser.add_argument('--eval-only', action='store_true')
     parser.add_argument('--ckpt', type=str, default=None)
     parser.add_argument('--seed', type=int, default=0)
@@ -125,9 +133,11 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ds = IDRiDDataset('train')
-    test_ds = IDRiDDataset('test')
+    train_ds = IDRiDDataset('train', photometric=args.photometric)
+    test_ds = IDRiDDataset('test')          # test pipeline never augments
     print(f'IDRiD: {len(train_ds)} train / {len(test_ds)} test | classes {CLASSES}')
+    if args.photometric:
+        print('  ** --photometric ON: deviation from the paper text **')
     _assert_masks_sane(test_ds)
 
     # spawn, not fork: forked workers deadlock against OpenCV/torch thread
@@ -140,8 +150,10 @@ def main() -> None:
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, **loader_kwargs)
 
     model = build_wfdenet_paper(
-        num_classes=len(CLASSES), pretrained=not args.no_pretrained
+        num_classes=len(CLASSES), pretrained=not args.no_pretrained,
+        backbone_variant=args.backbone,
     ).to(device)
+    print(f'backbone: {args.backbone}')
     n_params = sum(p.numel() for p in model.parameters())
     print(f'WFDENet: {n_params:,} params ({n_params / 1e6:.2f}M) | paper reports 9.51M')
 
