@@ -30,7 +30,7 @@ def check(name: str, ok: bool, detail: str = '') -> None:
         failures.append(name)
 
 
-print('1. parameter count')
+print('1. parameter count (FULL model only -- ablations legitimately have fewer)')
 model = build_wfdenet_paper(num_classes=4, pretrained=False)
 n = sum(p.numel() for p in model.parameters())
 rel = abs(n - PAPER_PARAMS) / PAPER_PARAMS
@@ -122,6 +122,72 @@ ev.update(torch.where(gt > 0, -10.0, 10.0), gt)      # inverted
 res_bad = ev.compute()
 check('inverted prediction -> Dice ~0', res_bad['mDice'] < 1.0,
       f'mDice {res_bad["mDice"]:.2f}')
+
+print('\n8. ablations (paper Tables 6-8)')
+from replication.wfdenet_paper import pad_to_even, unpad  # noqa: E402
+
+# With both boosters off the DWT/IDWT round-trip is the identity, so the decoder
+# sees G_l = F_l -- exactly the baseline of the paper's Table 12 caption
+# ("the backbone networks with our SD"). Verify that inside the real forward.
+abl = build_wfdenet_paper(num_classes=4, pretrained=False,
+                          use_lfb=False, use_hfb=False).eval()
+with torch.no_grad():
+    xin = torch.randn(1, 3, 256, 384)
+    feats = abl.backbone(xin)
+    laterals = [c(f) for c, f in zip(abl.lateral_convs, feats)]
+    lat4, ph, pw = pad_to_even(laterals[4])
+    lf, hf = [], []
+    for i in range(5):
+        lo, hi2 = abl.dwt[i](lat4 if i == 4 else laterals[i])
+        lf.append(lo)
+        hf.append(hi2)
+    gl = [abl.idwt[i](torch.cat([lf[i], hf[i]], dim=1)) for i in range(5)]
+    gl[4] = unpad(gl[4], ph, pw)
+    max_err = max((gl[i] - laterals[i]).abs().max().item() for i in range(5))
+check('boosters off => G_l == F_l (paper baseline)', max_err < 1e-5,
+      f'max err over the 5 levels {max_err:.2e}')
+
+_crit = WFDENetLoss()
+for name, kw, want_aux in [
+    ('no-LFB',        dict(use_lfb=False), 1),
+    ('no-HFB',        dict(use_hfb=False), 1),
+    ('no-LFB+no-HFB', dict(use_lfb=False, use_hfb=False), 0),
+    ('no-CCFAM',      dict(use_ccfam=False), 2),
+]:
+    mv = build_wfdenet_paper(num_classes=4, pretrained=False, **kw)
+    mv.eval()
+    with torch.no_grad():
+        yv = mv(torch.randn(1, 3, 256, 384))
+    ok_eval = isinstance(yv, torch.Tensor) and tuple(yv.shape) == (1, 4, 256, 384)
+
+    mv.train()
+    ov = mv(torch.randn(2, 3, 256, 384))
+    n_aux = (len(ov) - 1) if isinstance(ov, tuple) else 0
+    lv, _ = _crit(ov, (torch.rand(2, 4, 256, 384) > 0.9).float())
+    lv.backward()
+    bad = sum(1 for p in mv.parameters()
+              if p.grad is not None and not torch.isfinite(p.grad).all())
+    check(f'{name}: eval shape / {want_aux} aux / finite grads',
+          ok_eval and n_aux == want_aux and bad == 0 and torch.isfinite(lv),
+          f'aux={n_aux} (esperado {want_aux}), grads nao-finitos={bad}, '
+          f'params={sum(p.numel() for p in mv.parameters()):,}')
+
+print('\n9. per-image Dice (for paired comparisons)')
+gt1 = (torch.rand(1, 4, 64, 64) > 0.8).float()
+ev = SegEvaluator(CLASSES, keep_probs=False)
+ev.update(torch.where(gt1 > 0, 10.0, -10.0), gt1)
+ev.update(torch.where(gt1 > 0, -10.0, 10.0), gt1)
+pi = ev.per_image_dice()
+check('per-image dict populated', set(pi) == set(CLASSES), f'chaves={sorted(pi)}')
+check('2 imagens registradas', all(len(v) == 2 for v in pi.values()))
+check('img1 ~1.0 e img2 ~0.0', all(abs(v[0] - 1.0) < 0.02 and v[1] < 0.02
+                                   for v in pi.values()),
+      f'EX={pi["EX"].round(3).tolist()}')
+
+# batch > 1 must disable per-image collection rather than silently mislabel it
+ev_b = SegEvaluator(CLASSES, keep_probs=False)
+ev_b.update(torch.randn(2, 4, 32, 32), (torch.rand(2, 4, 32, 32) > 0.8).float())
+check('batch>1 desativa por-imagem (nao mente)', ev_b.per_image_dice() == {})
 
 print('\n' + '=' * 50)
 if failures:

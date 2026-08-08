@@ -17,7 +17,7 @@ numbers, so the paper's Table 1 can only be checked against this module.
     (Verified: (80.42+65.73+76.02+50.31)/4 = 68.12 = the paper's mDice.)
 """
 
-from typing import Dict, Sequence
+from typing import Dict, List, Sequence
 
 import numpy as np
 import torch
@@ -47,6 +47,11 @@ class SegEvaluator:
         self.p = torch.zeros(T, C, dtype=torch.float64)
         self.fn = torch.zeros(T, C, dtype=torch.float64)
         self._probs, self._gts = [], []
+        # Per-sample Dice, for paired tests between runs. The test loader uses
+        # batch_size=1, so one update() == one image; larger batches would make
+        # these per-batch instead, which is why _per_image_valid tracks it.
+        self._per_image: List[np.ndarray] = []
+        self._per_image_valid = True
 
     @torch.no_grad()
     def update(self, logits: torch.Tensor, target: torch.Tensor) -> None:
@@ -70,9 +75,33 @@ class SegEvaluator:
             self.p[i] += pb.sum(dim=(0, 2, 3)).double().cpu()
             self.fn[i] += gt_sum - tp
 
+        # Per-image Dice (threshold 0.5), reusing pred_bin/gt from above.
+        # Dice is nan when a class is absent from both prediction and GT, so
+        # paired tests must drop nans rather than treat them as zeros.
+        if probs.shape[0] == 1:
+            inter_i = (pred_bin * gt).sum(dim=(2, 3))[0].double()
+            denom_i = pred_bin.sum(dim=(2, 3))[0].double() + gt.sum(dim=(2, 3))[0].double()
+            dice_i = torch.where(denom_i > 0, 2 * inter_i / denom_i,
+                                 torch.full_like(denom_i, float('nan')))
+            self._per_image.append(dice_i.cpu().numpy())
+        else:
+            self._per_image_valid = False
+
         if self.keep_probs:
             self._probs.append(probs.cpu().half())
             self._gts.append(gt.cpu().to(torch.uint8))
+
+    def per_image_dice(self) -> Dict[str, np.ndarray]:
+        """{class_name: [N] Dice per image}. Empty if batches were not size 1.
+
+        Aggregated Dice (what Table 1 reports) is NOT the mean of these -- it
+        pools TP/FP/FN over the dataset first. These are for paired tests
+        between two runs scored on the same images, not for reporting.
+        """
+        if not (self._per_image_valid and self._per_image):
+            return {}
+        arr = np.stack(self._per_image)          # [N, C]
+        return {name: arr[:, c] for c, name in enumerate(self.class_names)}
 
     def compute(self) -> Dict[str, float]:
         # Divisions are on torch tensors, which yield nan/inf silently rather

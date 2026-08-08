@@ -470,11 +470,16 @@ class WFDENetPaper(nn.Module):
                  in_channels: Tuple[int, ...] = (16, 24, 40, 112, 1280),
                  align_corners: bool = False, bias: bool = True,
                  pretrained: bool = True,
-                 backbone_variant: str = 'tf_efficientnet_b1.in1k'):
+                 backbone_variant: str = 'tf_efficientnet_b1.in1k',
+                 use_lfb: bool = True, use_hfb: bool = True,
+                 use_ccfam: bool = True):
         super().__init__()
         self.num_classes = num_classes
         self.channels = channels
         self.align_corners = align_corners
+        self.use_lfb = use_lfb
+        self.use_hfb = use_hfb
+        self.use_ccfam = use_ccfam and use_hfb   # CCFAM lives inside HFB
 
         self.backbone = EfficientNetB1Features(
             pretrained=pretrained, variant=backbone_variant
@@ -492,7 +497,6 @@ class WFDENetPaper(nn.Module):
 
         self.dwt = nn.ModuleList([DWT() for _ in range(5)])
         self.idwt = nn.ModuleList([IDWT() for _ in range(5)])
-        self.ccfam = nn.ModuleList([CCFAM(channels * 3) for _ in range(5)])
 
         self.nf = nn.ModuleList([
             NeighborFuse(channels, align_corners, bias, top=True),
@@ -502,13 +506,21 @@ class WFDENetPaper(nn.Module):
             NeighborFuse(channels, align_corners, bias, bottom=True),
         ])
 
-        self.fpn_l = FPNHead(channels, align_corners, bias)
-        self.fpn_h = FPNHead(channels * 3, align_corners, bias)
         self.fpn_main = FPNHead(channels, align_corners, bias)
-
         self.conv_seg = nn.Conv2d(channels, num_classes, kernel_size=1)
-        self.spv_l = nn.Conv2d(channels, num_classes, kernel_size=1)
-        self.spv_h = nn.Conv2d(channels * 3, num_classes, kernel_size=1)
+
+        # Ablated branches are not instantiated at all, so their parameters do
+        # not exist (rather than sitting unused). Auxiliary supervision is a
+        # sub-component of each booster (paper Tables 7/8: "AS"), so a disabled
+        # branch also loses its aux head.
+        if use_lfb:
+            self.fpn_l = FPNHead(channels, align_corners, bias)
+            self.spv_l = nn.Conv2d(channels, num_classes, kernel_size=1)
+        if use_hfb:
+            self.fpn_h = FPNHead(channels * 3, align_corners, bias)
+            self.spv_h = nn.Conv2d(channels * 3, num_classes, kernel_size=1)
+        if self.use_ccfam:
+            self.ccfam = nn.ModuleList([CCFAM(channels * 3) for _ in range(5)])
 
     def forward(self, x: torch.Tensor):
         out_size = x.shape[2:]
@@ -534,13 +546,21 @@ class WFDENetPaper(nn.Module):
             lf.append(low)
             hf.append(high)
 
-        # Low-frequency booster (§3.3)
-        out_lfb = self.fpn_l(lf)
+        # Low-frequency booster (§3.3). Disabled -> raw LL passes through.
+        out_lfb = self.fpn_l(lf) if self.use_lfb else lf
 
-        # High-frequency booster (§3.4)
-        out_hfb = self.fpn_h([self.ccfam[i](hf[i]) for i in range(5)])
+        # High-frequency booster (§3.4). Disabled -> raw details pass through;
+        # with CCFAM alone disabled the multi-scale fusion still runs.
+        if self.use_hfb:
+            boosted = [self.ccfam[i](hf[i]) for i in range(5)] if self.use_ccfam else hf
+            out_hfb = self.fpn_h(boosted)
+        else:
+            out_hfb = hf
 
-        # Segmentation decoder (§3.5)
+        # Segmentation decoder (§3.5).
+        # With both boosters off this is IDWT(DWT(x)) == x, so G_l = F_l --
+        # exactly the baseline the paper defines in the Table 12 caption
+        # ("the backbone networks with our SD (i.e., G_l = F_l)").
         out_f = [self.idwt[i](torch.cat([out_lfb[i], out_hfb[i]], dim=1))
                  for i in range(5)]
         out_f[4] = unpad(out_f[4], pad_h, pad_w)
@@ -558,15 +578,26 @@ class WFDENetPaper(nn.Module):
         if not self.training:
             return main
 
-        aux_h = resize(self.spv_h(out_hfb[0]), out_size, self.align_corners)
-        aux_l = resize(self.spv_l(out_lfb[0]), out_size, self.align_corners)
-        return main, aux_h, aux_l
+        # Only the enabled boosters contribute an auxiliary map. WFDENetLoss
+        # iterates outputs[1:], so a shorter tuple just means fewer aux terms.
+        aux = []
+        if self.use_hfb:
+            aux.append(resize(self.spv_h(out_hfb[0]), out_size, self.align_corners))
+        if self.use_lfb:
+            aux.append(resize(self.spv_l(out_lfb[0]), out_size, self.align_corners))
+        return (main, *aux)
 
 
 def build_wfdenet_paper(num_classes: int = 4, pretrained: bool = True,
-                        backbone_variant: str = 'tf_efficientnet_b1.in1k'
-                        ) -> WFDENetPaper:
+                        backbone_variant: str = 'tf_efficientnet_b1.in1k',
+                        use_lfb: bool = True, use_hfb: bool = True,
+                        use_ccfam: bool = True) -> WFDENetPaper:
     """backbone_variant: 'tf_efficientnet_b1.in1k' matches the authors' TF-SAME
-    padding + BN eps 1e-3; 'efficientnet_b1' is the earlier (mismatched) run."""
+    padding + BN eps 1e-3; 'efficientnet_b1' is the earlier (mismatched) run.
+
+    use_lfb/use_hfb/use_ccfam reproduce the paper's ablations (Tables 6-8).
+    Note the ablated models have fewer parameters than the full 9,511,764.
+    """
     return WFDENetPaper(num_classes=num_classes, pretrained=pretrained,
-                        backbone_variant=backbone_variant)
+                        backbone_variant=backbone_variant,
+                        use_lfb=use_lfb, use_hfb=use_hfb, use_ccfam=use_ccfam)

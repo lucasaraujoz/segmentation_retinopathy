@@ -66,23 +66,23 @@ Nossa porta dá **9,511,764** — bate.
 
 ## Resultados
 
-Run **D1** (commit `307b8de`), comando exato:
+Melhor run (commit `f2d6982`), comando exato:
 
 ```bash
 python replication/train_idrid.py --iters 40000 --batch-size 4 --amp --workers 0 \
-    --out-dir outputs/repro_wfdenet_idrid
+    --out-dir outputs/repro_wfdenet_idrid_tfbb
 ```
 
 | classe | Dice ours | paper | Δ | AUPR ours | paper | Δ | IoU ours | paper | Δ |
 |---|---|---|---|---|---|---|---|---|---|
-| EX | **80.44** | 80.42 | **+0.02** | 86.67 | 86.61 | +0.06 | 67.29 | 67.25 | +0.04 |
-| HE | 64.39 | 65.73 | −1.34 | 69.53 | 69.05 | +0.48 | 47.48 | 48.95 | −1.47 |
-| SE | 72.31 | 76.02 | −3.71 | 76.16 | 81.28 | −5.12 | 56.63 | 61.31 | −4.68 |
-| MA | 41.39 | 50.31 | **−8.92** | 41.07 | 49.91 | −8.84 | 26.10 | 33.61 | −7.51 |
-| **média** | **64.63** | 68.12 | −3.49 | **68.36** | 71.71 | −3.35 | **49.37** | 52.78 | −3.41 |
+| EX | **80.47** | 80.42 | **+0.05** | 86.73 | 86.61 | **+0.12** | 67.32 | 67.25 | +0.07 |
+| HE | **65.71** | 65.73 | **−0.02** | 70.63 | 69.05 | **+1.58** | 48.93 | 48.95 | −0.02 |
+| SE | 70.68 | 76.02 | −5.34 | 74.23 | 81.28 | −7.05 | 54.65 | 61.31 | −6.66 |
+| MA | 44.20 | 50.31 | −6.11 | 42.80 | 49.91 | −7.11 | 28.37 | 33.61 | −5.24 |
+| **média** | **65.26** | 68.12 | **−2.86** | **68.59** | 71.71 | −3.12 | **49.82** | 52.78 | −2.96 |
 
-**EX reproduzido exatamente** (+0.02 Dice, +0.06 AUPR); HE dentro do ruído.
-SE a ~4 e **MA a ~9** são o resíduo.
+**EX e HE reproduzidos essencialmente exatos** (+0.05 e −0.02 de Dice; em AUPR
+os dois ficam *acima* do publicado). SE e MA continuam ~5-6 abaixo.
 
 ### Histórico das iterações
 
@@ -91,15 +91,68 @@ SE a ~4 e **MA a ~9** são o resíduo.
 | inicial | máscara `IDRiD_81_EX.tif` RGBA envenenando EX | 51.65 | 41.01 |
 | `e1f2f3b` | fix da máscara RGBA | 63.63 | 41.01 |
 | `8613fdc` | multi-scale 2880 + ColorJitter + batch 2 | 59.92 ⬇ | 36.52 |
-| **`307b8de` (D1)** | revert do ColorJitter; multi-scale sobre o nativo; batch 4 + AMP | **64.63** | 41.39 |
+| `307b8de` (D1) | revert do ColorJitter; multi-scale sobre o nativo; batch 4 + AMP | 64.63 | 41.39 |
+| **`f2d6982`** | backbone TF-SAME (`tf_efficientnet_b1`) | **65.26** | **44.20** |
 
-O `8613fdc` **regrediu** e o resultado foi inútil: mudei duas coisas grandes ao
-mesmo tempo (augmentation **e** batch 4→2) e a augmentation embutia um
-`ColorJitter` que eu havia inventado. Lição registrada: **um fator por run**.
+Duas lições registradas:
 
-O D1 resolveu EX e HE, mas **MA praticamente não se moveu** (41.01 → 41.39), o
-que **refuta** a hipótese de que o borrão do upscale explicava o gap de MA — ela
-explicava as lesões grandes, não as pequenas.
+- O `8613fdc` **regrediu** e o resultado foi inútil porque mudei duas coisas
+  grandes ao mesmo tempo (augmentation **e** batch 4→2), e a augmentation ainda
+  embutia um `ColorJitter` inventado. **Um fator por run.**
+- O D1 resolveu EX/HE mas **não mexeu no MA** (41.01 → 41.39), o que *refutou* a
+  hipótese de que o borrão do upscale explicava o gap de MA. Quem moveu o MA
+  (+2.81) foi o backbone TF-SAME — ou seja, era alinhamento sub-pixel, não
+  resolução de treino.
+
+## Ablação: o mecanismo proposto funciona?
+
+Com a réplica próxima o bastante para servir de instrumento, a pergunta vira
+**a decomposição wavelet (LFB+HFB) realmente melhora a rede?**
+
+⚠️ **O paper só ablacionou no DDR** (§4.5: *"ablation studies on the DDR
+dataset"*), **nunca no IDRiD**. Rodar a ablação aqui produz informação que o
+paper não tem.
+
+Alvos publicados (Tabela 6, **DDR**, com SD ligado — mapeamento confirmado por 3
+referências cruzadas: Tab. 7 "line 7 = sem LFB", Tab. 8 "line 6 = sem HFB",
+Tab. 12 baseline = 45.14):
+
+| config | mAUPR | mDice | mIoU | ganho mDice |
+|---|---|---|---|---|
+| SD só (G_l = F_l) | 46.61 | 45.14 | 29.68 | — |
+| + LFB | 48.22 | 46.57 | 31.15 | +1.43 |
+| + HFB | 50.01 | 48.82 | 33.06 | +3.68 |
+| **completo** | 51.57 | 50.38 | 34.48 | **+5.24** |
+
+```bash
+# baseline sem o mecanismo (~16h)
+python replication/train_idrid.py --iters 40000 --batch-size 4 --amp --workers 0 \
+    --no-lfb --no-hfb --out-dir outputs/repro_idrid_ablation_nowavelet
+
+# comparação pareada contra o completo
+python replication/compare_runs.py outputs/repro_wfdenet_idrid_tfbb \
+                                   outputs/repro_idrid_ablation_nowavelet
+```
+
+**A ablação é exata, não aproximada.** Como `IDWT(DWT(x)) = x` (verificado:
+erro ~1e-8 nos 5 níveis dentro do forward real), desligar os dois boosters faz
+`G_l = F_l` — que é *literalmente* como o paper define o baseline na legenda da
+Tabela 12 (*"the backbone networks with our SD (i.e., G_l = F_l)"*). Ramo
+desligado também perde sua cabeça auxiliar, porque o paper trata AS como
+sub-componente de cada booster (Tabs. 7/8). Params: completo 9.511.764,
+sem-LFB 9.326.224, sem-HFB 7.382.632, sem-ambos 7.197.092, sem-CCFAM 9.045.164.
+
+**Fora de escopo, deliberadamente:** ablação do SD. O próprio paper (§3.5) diz
+que ele é *"inspired by PMCNet"* — não é a contribuição nova, e desligá-lo
+exigiria inventar um decoder substituto.
+
+**Estatística.** `compare_runs.py` faz **Wilcoxon pareado** sobre o Dice por
+imagem (`test_scores.npz`), reusando `wilcoxon_paired` de
+`compare_experiments.py`. Pareado porque os dois runs veem exatamente as mesmas
+27 imagens — muito mais poder que comparar agregados, o que importa aqui porque
+MA cobre ~0.1% dos pixels e poucas imagens dominam a métrica. O Dice agregado
+reportado **não** é a média do por-imagem (ele agrupa TP/FP/FN no dataset todo,
+convenção da Tabela 1); o por-imagem serve só para o teste de significância.
 
 ## Como rodar
 

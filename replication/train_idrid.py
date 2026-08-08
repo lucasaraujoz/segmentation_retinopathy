@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 import cv2  # noqa: F401  -- must precede torch (CXXABI clash in this env)
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -79,9 +80,11 @@ def _assert_masks_sane(dataset, max_fraction: float = 0.30) -> None:
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False) -> dict:
+def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False,
+             per_image_out: Path = None) -> dict:
     model.eval()
     evaluator = SegEvaluator(CLASSES, keep_probs=keep_probs)
+    filenames = []
     for batch in loader:
         images = batch['image'].to(device, non_blocking=True)
         masks = batch['mask'].to(device, non_blocking=True)
@@ -89,7 +92,16 @@ def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False) 
             logits = model(images)      # eval mode -> single tensor
         logits = logits.float()
         evaluator.update(logits, masks)
+        filenames.extend(batch['filename'])
     model.train()
+
+    if per_image_out is not None:
+        # Per-image Dice for paired comparisons between runs (compare_runs.py).
+        # Same test_scores.npz convention the FGADR series uses.
+        per_img = evaluator.per_image_dice()
+        if per_img:
+            np.savez(per_image_out, filenames=np.array(filenames), **per_img)
+
     return evaluator.compute()
 
 
@@ -123,6 +135,15 @@ def main() -> None:
                         help='DEVIATION from the paper (which lists three '
                              'augmentations, none photometric): add colour jitter '
                              "approximating M2MRF's PhotoMetricDistortion.")
+    # Ablations of the paper's proposed mechanism (Tables 6-8). With both
+    # boosters off, G_l = F_l exactly -- the baseline of the Table 12 caption.
+    parser.add_argument('--no-lfb', action='store_true',
+                        help='Disable the low-frequency booster.')
+    parser.add_argument('--no-hfb', action='store_true',
+                        help='Disable the high-frequency booster (implies no CCFAM).')
+    parser.add_argument('--no-ccfam', action='store_true',
+                        help='Keep HFB multi-scale fusion but drop the complex '
+                             'Fourier attention.')
     parser.add_argument('--eval-only', action='store_true')
     parser.add_argument('--ckpt', type=str, default=None)
     parser.add_argument('--seed', type=int, default=0)
@@ -152,10 +173,16 @@ def main() -> None:
     model = build_wfdenet_paper(
         num_classes=len(CLASSES), pretrained=not args.no_pretrained,
         backbone_variant=args.backbone,
+        use_lfb=not args.no_lfb, use_hfb=not args.no_hfb,
+        use_ccfam=not args.no_ccfam,
     ).to(device)
     print(f'backbone: {args.backbone}')
+    ablated = [n for n, off in (('LFB', args.no_lfb), ('HFB', args.no_hfb),
+                                ('CCFAM', args.no_ccfam)) if off]
+    print(f'ablation: {" + ".join("no-" + a for a in ablated) if ablated else "none (full model)"}')
     n_params = sum(p.numel() for p in model.parameters())
-    print(f'WFDENet: {n_params:,} params ({n_params / 1e6:.2f}M) | paper reports 9.51M')
+    ref = ' | paper reports 9.51M' if not ablated else ' | ablated (full model is 9.51M)'
+    print(f'WFDENet: {n_params:,} params ({n_params / 1e6:.2f}M){ref}')
 
     if args.ckpt:
         state = torch.load(args.ckpt, map_location=device)
@@ -163,7 +190,8 @@ def main() -> None:
         print(f'loaded checkpoint {args.ckpt}')
 
     if args.eval_only:
-        results = evaluate(model, test_loader, device, amp=args.amp)
+        results = evaluate(model, test_loader, device, amp=args.amp,
+                           per_image_out=out_dir / 'test_scores.npz')
         print('\n' + format_comparison(results))
         (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
         return
@@ -248,10 +276,11 @@ def main() -> None:
     torch.save({'iter': args.iters, 'model': model.state_dict()}, final_ckpt)
 
     print('\n=== final model, IDRiD test set (27 images) ===')
-    results = evaluate(model, test_loader, device, amp=args.amp)
+    results = evaluate(model, test_loader, device, amp=args.amp,
+                       per_image_out=out_dir / 'test_scores.npz')
     print(format_comparison(results))
     (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
-    print(f'\nsaved {final_ckpt} and {out_dir / "test_results.json"}')
+    print(f'\nsaved {final_ckpt}, test_results.json and test_scores.npz in {out_dir}')
 
 
 if __name__ == '__main__':
