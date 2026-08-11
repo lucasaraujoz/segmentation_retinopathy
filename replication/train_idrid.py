@@ -32,18 +32,25 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from replication.ddr import DDRDataset
 from replication.idrid import CLASSES, IDRiDDataset
 from replication.loss import WFDENetLoss
-from replication.metrics_mmseg import SegEvaluator, format_comparison
+from replication.metrics_mmseg import PAPER_TARGETS, SegEvaluator, format_comparison
 from replication.wfdenet_paper import build_wfdenet_paper
 
-# Paper §4.2.2
+# Paper §4.2.2 -- identical for both datasets except the iteration budget.
 BASE_LR = 0.01
 MOMENTUM = 0.9
 WEIGHT_DECAY = 0.0005
 POLY_POWER = 0.9
-MAX_ITERS = 40000
 BATCH_SIZE = 4
+
+# "trained ... for 40k iterations on the IDRiD dataset and 100k iterations on
+# the DDR dataset with a mini-batch size of 4" (§4.2.2).
+DATASETS = {
+    'idrid': dict(cls=IDRiDDataset, iters=40000, size='960x1440'),
+    'ddr':   dict(cls=DDRDataset,   iters=100000, size='1024x1024'),
+}
 
 
 def poly_lr(base_lr: float, it: int, max_iters: int, power: float = POLY_POWER) -> float:
@@ -107,7 +114,11 @@ def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--iters', type=int, default=MAX_ITERS)
+    parser.add_argument('--dataset', type=str, default='idrid', choices=list(DATASETS),
+                        help='Which paper dataset to run. Sets the input size, '
+                             'normalisation and default iteration budget.')
+    parser.add_argument('--iters', type=int, default=None,
+                        help='Default: 40000 for idrid, 100000 for ddr (§4.2.2).')
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
     parser.add_argument('--accum', type=int, default=1,
                         help='Gradient accumulation steps. Effective batch = '
@@ -149,14 +160,26 @@ def main() -> None:
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
 
+    spec = DATASETS[args.dataset]
+    if args.iters is None:
+        args.iters = spec['iters']
+    paper_ref = PAPER_TARGETS[args.dataset]
+
     torch.manual_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ds = IDRiDDataset('train', photometric=args.photometric)
-    test_ds = IDRiDDataset('test')          # test pipeline never augments
-    print(f'IDRiD: {len(train_ds)} train / {len(test_ds)} test | classes {CLASSES}')
+    if args.dataset == 'idrid':
+        train_ds = IDRiDDataset('train', photometric=args.photometric)
+        test_ds = IDRiDDataset('test')      # test pipeline never augments
+    else:
+        if args.photometric:
+            parser.error('--photometric is only wired for idrid')
+        train_ds = DDRDataset('train')
+        test_ds = DDRDataset('test')        # Table 6 evaluates on test, not valid
+    print(f'{args.dataset}: {len(train_ds)} train / {len(test_ds)} test '
+          f'| {spec["size"]} | classes {CLASSES}')
     if args.photometric:
         print('  ** --photometric ON: deviation from the paper text **')
     _assert_masks_sane(test_ds)
@@ -192,7 +215,7 @@ def main() -> None:
     if args.eval_only:
         results = evaluate(model, test_loader, device, amp=args.amp,
                            per_image_out=out_dir / 'test_scores.npz')
-        print('\n' + format_comparison(results))
+        print('\n' + format_comparison(results, paper_ref))
         (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
         return
 
@@ -275,10 +298,10 @@ def main() -> None:
     final_ckpt = out_dir / 'final.pth'
     torch.save({'iter': args.iters, 'model': model.state_dict()}, final_ckpt)
 
-    print('\n=== final model, IDRiD test set (27 images) ===')
+    print(f'\n=== final model, {args.dataset} test set ({len(test_ds)} images) ===')
     results = evaluate(model, test_loader, device, amp=args.amp,
                        per_image_out=out_dir / 'test_scores.npz')
-    print(format_comparison(results))
+    print(format_comparison(results, paper_ref))
     (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
     print(f'\nsaved {final_ckpt}, test_results.json and test_scores.npz in {out_dir}')
 

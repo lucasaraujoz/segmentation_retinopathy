@@ -158,6 +158,24 @@ PAPER_IDRID = {
     'mIoU': 52.78,
 }
 
+# Paper Table 2, DDR test set (full model). Cross-checked: the per-class means
+# reproduce Table 6 row 8 (51.57 / 50.38 / 34.48) exactly.
+PAPER_DDR = {
+    'AUPR_EX': 66.30, 'AUPR_HE': 60.73, 'AUPR_SE': 54.95, 'AUPR_MA': 24.29,
+    'mAUPR': 51.57,
+    'Dice_EX': 61.82, 'Dice_HE': 54.53, 'Dice_SE': 55.09, 'Dice_MA': 30.06,
+    'mDice': 50.38,
+    'IoU_EX': 44.74, 'IoU_HE': 37.48, 'IoU_SE': 38.02, 'IoU_MA': 17.69,
+    'mIoU': 34.48,
+}
+
+# Paper Table 6 row 4 -- DDR with SD only (G_l = F_l), i.e. the ablated arm.
+# Per-class values are not published, only the means. The gap to PAPER_DDR
+# (+5.24 mDice) is the claim the DDR ablation confronts.
+PAPER_DDR_ABLATED = {'mAUPR': 46.61, 'mDice': 45.14, 'mIoU': 29.68}
+
+PAPER_TARGETS = {'idrid': PAPER_IDRID, 'ddr': PAPER_DDR}
+
 
 def format_comparison(results: Dict[str, float],
                       reference: Dict[str, float] = PAPER_IDRID) -> str:

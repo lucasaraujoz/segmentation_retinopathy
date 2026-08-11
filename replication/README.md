@@ -154,6 +154,80 @@ MA cobre ~0.1% dos pixels e poucas imagens dominam a métrica. O Dice agregado
 reportado **não** é a média do por-imagem (ele agrupa TP/FP/FN no dataset todo,
 convenção da Tabela 1); o por-imagem serve só para o teste de significância.
 
+### Resultado da ablação no IDRiD
+
+| | completo | sem LFB+HFB | Δ |
+|---|---|---|---|
+| Dice_EX | 80.47 | 79.85 | −0.62 |
+| Dice_HE | 65.71 | 65.51 | −0.20 |
+| Dice_SE | 70.68 | 66.33 | **−4.35** |
+| Dice_MA | 44.20 | **45.23** | **+1.03** ⬆ |
+| **mDice** | **65.26** | 64.23 | **−1.03** |
+
+Remover o mecanismo inteiro custa **1.03 mDice** no IDRiD, contra os **+5.24**
+alegados no DDR. MA fica *melhor* sem ele — o paper afirma vencer justamente em
+SE e MA. Só SE ganha de verdade.
+
+⚠️ **Não conclusivo sozinho:** 1 seed, 27 imagens de teste, 54 de treino. É por
+isso que o teste decisivo foi movido para o DDR.
+
+## DDR — a ablação no dataset onde ELES ablacionaram
+
+`/home/lucas/datasets/ddr/DDR-dataset/lesion_segmentation`, split oficial
+**383 / 149 / 225** (bate com o paper). Avaliamos no **test**, como a §4.5.
+
+```bash
+# completo
+python replication/train_idrid.py --dataset ddr --iters 100000 --batch-size 4 \
+    --amp --workers 4 --out-dir outputs/ddr_full
+
+# sem o mecanismo
+python replication/train_idrid.py --dataset ddr --iters 100000 --batch-size 4 \
+    --amp --workers 4 --no-lfb --no-hfb --out-dir outputs/ddr_nowavelet
+
+python replication/compare_runs.py outputs/ddr_full outputs/ddr_nowavelet
+```
+
+~33h por run; rodar os dois braços em paralelo em máquinas diferentes fecha em
+~33h de relógio. (O arquivo ainda se chama `train_idrid.py` por histórico —
+`--dataset` seleciona qual protocolo roda.)
+
+**Alvos publicados, para os dois braços:**
+
+| | EX | HE | SE | MA | média |
+|---|---|---|---|---|---|
+| AUPR (completo, Tab. 2) | 66.30 | 60.73 | 54.95 | 24.29 | **51.57** |
+| Dice (completo, Tab. 2) | 61.82 | 54.53 | 55.09 | 30.06 | **50.38** |
+| IoU (completo, Tab. 2) | 44.74 | 37.48 | 38.02 | 17.69 | **34.48** |
+| ablado (Tab. 6 linha 4) | — | — | — | — | mDice **45.14** |
+
+⇒ ganho alegado do mecanismo: **+5.24 mDice**. É esse número que o experimento
+confronta. Validação cruzada: as médias por classe da Tabela 2 reproduzem
+exatamente a linha 8 da Tabela 6.
+
+### O DDR é MAIS fiel que o IDRiD, em dois pontos
+
+**1. Multi-scale exato sobre o nativo.** O DDR tem **27 resoluções distintas**
+(aspect 0.995–1.765), então o fator de escala não pode ser pré-computado como no
+IDRiD. Mas `mmcv.imrescale` com `scale=(S,S)` reduz a *"o lado maior vira S"*, e
+`A.LongestMaxSize(max_size=range(512,2049))` faz exatamente isso — com `S =
+int(1024·r)`, `r~U(0.5,2)`. Amostrar os inteiros uniformemente ≡ uniforme em `r`.
+
+**2. Sem cache.** Medido: **0.026 s/amostra** de IO contra ~1.1 s de passo de
+GPU, então `--workers 4` esconde tudo. Ler do nativo a cada iteração **elimina**
+a aproximação de duplo-resize que o IDRiD carrega (cache→alvo em vez de
+nativo→alvo) e mantém a RAM baixa.
+
+**3. `Normalize → Pad`, ordem do mmseg** (o IDRiD herdou `Pad → Normalize` do
+`e1f2f3b`). No DDR isso importa muito: com aspecto ~1.5 o crop de 1024 só cabe
+sem padding quando `r ≥ 1.5`, então **~2/3 das amostras têm padding** (medido:
+47/60). Verificado que a borda sai em (81,50,21) = a média do dataset, não preto.
+
+Máscaras do DDR são limpas — modo `L`, valores `{0,255}`, as 4 presentes para
+toda imagem. Sem a armadilha de palette/RGBA do IDRiD. SE é esparso: 111/383 no
+treino e só **42/225** no teste. Uma imagem emite `Corrupt JPEG data: 40
+extraneous bytes`; o cv2 lê normalmente.
+
 ## Como rodar
 
 ```bash
