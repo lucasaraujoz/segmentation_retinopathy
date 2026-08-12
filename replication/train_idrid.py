@@ -204,7 +204,13 @@ def main() -> None:
         pin_memory=True,
         multiprocessing_context='spawn' if args.workers > 0 else None,
     )
-    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, **loader_kwargs)
+    # Evaluation runs single-process on purpose. Decoding one test sample costs
+    # ~0.03 s, so 225 images is ~6 s -- not worth spawning workers that then sit
+    # alive alongside the persistent training workers. That combination (plus
+    # the memory the final eval accumulates) segfaulted a worker at the end of
+    # a 100k DDR run, losing the eval of an otherwise finished model.
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False,
+                             num_workers=0, pin_memory=True)
 
     model = build_wfdenet_paper(
         num_classes=len(CLASSES), pretrained=not args.no_pretrained,
@@ -312,8 +318,25 @@ def main() -> None:
     torch.save({'iter': args.iters, 'model': model.state_dict()}, final_ckpt)
 
     print(f'\n=== final model, {args.dataset} test set ({len(test_ds)} images) ===')
-    results = evaluate(model, test_loader, device, amp=args.amp,
-                       per_image_out=out_dir / 'test_scores.npz')
+    try:
+        results = evaluate(model, test_loader, device, amp=args.amp,
+                           per_image_out=out_dir / 'test_scores.npz')
+    except Exception as exc:
+        # The checkpoint above is already on disk, so a failure here costs the
+        # scoring, never the training. Say so loudly and print the one command
+        # that recovers it.
+        print(f'\n!! evaluation failed ({type(exc).__name__}: {exc})')
+        print(f'!! TRAINING IS SAFE -- {final_ckpt} holds the {args.iters}-iter model.')
+        print(f'!! recover the scores with:\n'
+              f'     python {Path(__file__).name} --dataset {args.dataset} --eval-only \\\n'
+              f'         --ckpt {final_ckpt} --workers 0'
+              f'{" --amp" if args.amp else ""}'
+              f'{" --no-lfb" if args.no_lfb else ""}'
+              f'{" --no-hfb" if args.no_hfb else ""}'
+              f'{" --no-ccfam" if args.no_ccfam else ""} \\\n'
+              f'         --out-dir {out_dir}')
+        raise
+
     print(format_comparison(results, paper_ref, ref_label))
     (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
     print(f'\nsaved {final_ckpt}, test_results.json and test_scores.npz in {out_dir}')

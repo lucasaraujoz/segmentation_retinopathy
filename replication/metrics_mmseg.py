@@ -132,17 +132,24 @@ class SegEvaluator:
         # Threshold-free cross-check. Not comparable to Table 1 (the paper uses
         # the 11-threshold AUPR above), but comparable to our FGADR series,
         # which uses sklearn AP throughout (metrics_detection.py).
+        #
+        # Done one class at a time. Concatenating all classes at once and
+        # calling .float() on the result peaked around 6.6 GB on DDR
+        # (225 images x 4 classes x 1024^2) and killed a DataLoader worker;
+        # per class the peak is ~1.2 GB. IDRiD never hit this -- it is 7x
+        # smaller.
         if self.keep_probs and self._probs:
-            probs = torch.cat(self._probs).float().numpy()
-            gts = torch.cat(self._gts).numpy()
             ap = []
             for c, name in enumerate(self.class_names):
-                y_true = gts[:, c].ravel()
+                y_true = torch.cat([g[:, c] for g in self._gts]).numpy().ravel()
                 if y_true.max() == 0:
                     ap.append(np.nan)
+                    del y_true
                     continue
-                ap.append(average_precision_score(y_true, probs[:, c].ravel()))
+                y_score = torch.cat([p[:, c] for p in self._probs]).float().numpy().ravel()
+                ap.append(average_precision_score(y_true, y_score))
                 out[f'AP_sklearn_{name}'] = float(ap[-1] * 100)
+                del y_true, y_score
             out['mAP_sklearn'] = float(np.nanmean(ap) * 100)
 
         return out
