@@ -7,3 +7,13 @@ nohup*
 exp_*
 mask_quality
 mask_review
+*.ipynb
+*.csv
+*.json
+!cv_splits_3.json
+!cv_splits_all.json
+!metrics_fold*.csv
+*.pth
+*.png
+# clone read-only do WFDENet oficial (recriar com o SHA no replication_2/README.md)
+replication_2/upstream/
