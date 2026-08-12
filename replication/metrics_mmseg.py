@@ -178,9 +178,18 @@ PAPER_TARGETS = {'idrid': PAPER_IDRID, 'ddr': PAPER_DDR}
 
 
 def format_comparison(results: Dict[str, float],
-                      reference: Dict[str, float] = PAPER_IDRID) -> str:
-    """Side-by-side table of our run vs. the published numbers."""
-    lines = [
+                      reference: Dict[str, float] = PAPER_IDRID,
+                      label: str = '') -> str:
+    """Side-by-side table of our run vs. the published numbers.
+
+    `label` names which published row is being compared against -- an ablated
+    run must NOT be read against the full-model table, so the caller states the
+    reference explicitly and it gets printed in the header.
+    """
+    lines = []
+    if label:
+        lines.append(f'reference: {label}')
+    lines += [
         f'{"metric":<16}{"ours":>9}{"paper":>9}{"delta":>9}',
         '-' * 43,
     ]

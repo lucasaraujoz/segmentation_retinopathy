@@ -35,7 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from replication.ddr import DDRDataset
 from replication.idrid import CLASSES, IDRiDDataset
 from replication.loss import WFDENetLoss
-from replication.metrics_mmseg import PAPER_TARGETS, SegEvaluator, format_comparison
+from replication.metrics_mmseg import (PAPER_DDR_ABLATED, PAPER_TARGETS,
+                                        SegEvaluator, format_comparison)
 from replication.wfdenet_paper import build_wfdenet_paper
 
 # Paper §4.2.2 -- identical for both datasets except the iteration budget.
@@ -163,7 +164,19 @@ def main() -> None:
     spec = DATASETS[args.dataset]
     if args.iters is None:
         args.iters = spec['iters']
-    paper_ref = PAPER_TARGETS[args.dataset]
+
+    # An ablated run must not be scored against the full-model table. With both
+    # boosters off the model IS the paper's Table 6 row 4 baseline (G_l = F_l),
+    # whose published numbers are means only -- per-class is not in the paper.
+    fully_ablated = args.no_lfb and args.no_hfb
+    if args.dataset == 'ddr' and fully_ablated:
+        paper_ref = PAPER_DDR_ABLATED
+        ref_label = 'DDR Table 6 row 4 (SD only, G_l = F_l) -- means only'
+    else:
+        paper_ref = PAPER_TARGETS[args.dataset]
+        ref_label = f'{args.dataset} full model (Table {"2" if args.dataset == "ddr" else "1"})'
+        if fully_ablated:
+            ref_label += '  [!] ablated run vs FULL-model targets'
 
     torch.manual_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -215,7 +228,7 @@ def main() -> None:
     if args.eval_only:
         results = evaluate(model, test_loader, device, amp=args.amp,
                            per_image_out=out_dir / 'test_scores.npz')
-        print('\n' + format_comparison(results, paper_ref))
+        print('\n' + format_comparison(results, paper_ref, ref_label))
         (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
         return
 
@@ -301,7 +314,7 @@ def main() -> None:
     print(f'\n=== final model, {args.dataset} test set ({len(test_ds)} images) ===')
     results = evaluate(model, test_loader, device, amp=args.amp,
                        per_image_out=out_dir / 'test_scores.npz')
-    print(format_comparison(results, paper_ref))
+    print(format_comparison(results, paper_ref, ref_label))
     (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
     print(f'\nsaved {final_ckpt}, test_results.json and test_scores.npz in {out_dir}')
 
