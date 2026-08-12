@@ -28,6 +28,7 @@ from pathlib import Path
 import cv2  # noqa: F401  -- must precede torch (CXXABI clash in this env)
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -107,6 +108,19 @@ def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False,
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
             logits = model(images)      # eval mode -> single tensor
         logits = logits.float()
+        if logits.shape[-2:] != masks.shape[-2:]:
+            # Full-resolution scoring: the dataset kept the ground truth at its
+            # native size, so bring the logits back to it -- exactly what
+            # mmseg's BaseSegmentor.postprocess_result does before evaluating
+            # (bilinear, align_corners=False).
+            #
+            # Done on CPU on purpose. A DDR image is up to 3888x2592, so the
+            # evaluator's 11-threshold sweep would allocate ~1.7 GB of transient
+            # GPU tensors per image -- enough to OOM a training run sharing the
+            # card. The forward stays on GPU; only the scoring moves.
+            logits = F.interpolate(logits.cpu(), size=masks.shape[-2:],
+                                   mode='bilinear', align_corners=False)
+            masks = masks.cpu()
         evaluator.update(logits, masks)
         filenames.extend(batch['filename'])
     model.train()
@@ -171,6 +185,13 @@ def main() -> None:
     parser.add_argument('--no-ccfam', action='store_true',
                         help='Keep HFB multi-scale fusion but drop the complex '
                              'Fourier attention.')
+    parser.add_argument('--full-res-eval', action='store_true',
+                        help='Score at the native image resolution, as mmseg does: '
+                             'the logits are resized back to ori_shape and compared '
+                             'against the untouched GT. The default instead shrinks '
+                             'the GT to the inference size, which on DDR also squashes '
+                             'the aspect ratio. ddr only, and it disables the sklearn '
+                             'AP cross-check (native-resolution probs do not fit in RAM).')
     parser.add_argument('--eval-only', action='store_true')
     parser.add_argument('--ckpt', type=str, default=None)
     parser.add_argument('--seed', type=int, default=0)
@@ -200,12 +221,12 @@ def main() -> None:
 
     if args.dataset == 'idrid':
         train_ds = IDRiDDataset('train', photometric=args.photometric)
-        test_ds = IDRiDDataset('test')      # test pipeline never augments
+        test_ds = IDRiDDataset('test', full_res_eval=args.full_res_eval)
     else:
         if args.photometric:
             parser.error('--photometric is only wired for idrid')
         train_ds = DDRDataset('train')
-        test_ds = DDRDataset('test')        # Table 6 evaluates on test, not valid
+        test_ds = DDRDataset('test', full_res_eval=args.full_res_eval)
     print(f'{args.dataset}: {len(train_ds)} train / {len(test_ds)} test '
           f'| {spec["size"]} | classes {CLASSES}')
     if args.photometric:
@@ -247,7 +268,8 @@ def main() -> None:
         print(f'loaded checkpoint {args.ckpt}')
 
     if args.eval_only:
-        results = evaluate(model, test_loader, device, amp=args.amp,
+        results = evaluate(model, test_loader, device,
+                           keep_probs=not args.full_res_eval, amp=args.amp,
                            per_image_out=out_dir / 'test_scores.npz')
         print('\n' + format_comparison(results, paper_ref, ref_label))
         (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
@@ -334,7 +356,8 @@ def main() -> None:
 
     print(f'\n=== final model, {args.dataset} test set ({len(test_ds)} images) ===')
     try:
-        results = evaluate(model, test_loader, device, amp=args.amp,
+        results = evaluate(model, test_loader, device,
+                           keep_probs=not args.full_res_eval, amp=args.amp,
                            per_image_out=out_dir / 'test_scores.npz')
     except Exception as exc:
         # The checkpoint above is already on disk, so a failure here costs the

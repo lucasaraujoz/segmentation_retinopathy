@@ -33,6 +33,7 @@ from typing import List, Tuple
 import albumentations as A
 import cv2
 import numpy as np
+import torch
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from torch.utils.data import Dataset
@@ -103,7 +104,8 @@ _PAD_FILL = ({'fill': 0, 'fill_mask': 0}
 class IDRiDDataset(Dataset):
     def __init__(self, split: str = 'train', root: Path = IDRID_ROOT,
                  classes: Tuple[str, ...] = CLASSES, is_train: bool = None,
-                 cache: bool = True, photometric: bool = False):
+                 cache: bool = True, photometric: bool = False,
+                 full_res_eval: bool = False):
         assert split in _SPLIT_DIRS, f'unknown split {split!r}'
         self.split = split
         self.root = Path(root)
@@ -116,6 +118,11 @@ class IDRiDDataset(Dataset):
             raise FileNotFoundError(f'no .jpg images under {img_dir}')
 
         self.gt_dir = self.root / '2. All Segmentation Groundtruths' / _SPLIT_DIRS[split]
+        # Full-resolution scoring needs the untouched mask, so the 960x1440
+        # test cache (which pre-resizes both) has to be bypassed.
+        self.full_res_eval = full_res_eval
+        if full_res_eval and not self.is_train:
+            cache = False
         self.cache = cache
         self.transform = build_transform(self.is_train,
                                          include_base_resize=not cache,
@@ -182,6 +189,14 @@ class IDRiDDataset(Dataset):
             image, mask = self._cache[idx]
         else:
             image, mask = self._read_raw(img_path)
+
+        if self.full_res_eval and not self.is_train:
+            # mmseg scores against the native-resolution ground truth; see
+            # BaseSegmentor.postprocess_result. Resize the image only.
+            out = self.transform(image=image)
+            mask_t = torch.from_numpy(mask).permute(2, 0, 1).float()
+            return {'image': out['image'], 'mask': mask_t,
+                    'filename': img_path.name}
 
         out = self.transform(image=image, mask=mask)
         return {

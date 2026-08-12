@@ -27,6 +27,7 @@ from typing import List, Tuple
 import albumentations as A
 import cv2
 import numpy as np
+import torch
 from albumentations.pytorch import ToTensorV2
 from PIL import Image
 from torch.utils.data import Dataset
@@ -68,12 +69,14 @@ _LONGEST_SIDES = list(range(int(CROP * RATIO_RANGE[0]), int(CROP * RATIO_RANGE[1
 
 class DDRDataset(Dataset):
     def __init__(self, split: str = 'train', root: Path = DDR_ROOT,
-                 classes: Tuple[str, ...] = CLASSES, is_train: bool = None):
+                 classes: Tuple[str, ...] = CLASSES, is_train: bool = None,
+                 full_res_eval: bool = False):
         assert split in _LABEL_DIRS, f'unknown split {split!r}'
         self.split = split
         self.root = Path(root)
         self.classes = classes
         self.is_train = (split == 'train') if is_train is None else is_train
+        self.full_res_eval = full_res_eval
 
         img_dir = self.root / split / 'image'
         self.images: List[Path] = sorted(img_dir.glob('*.jpg'))
@@ -116,6 +119,20 @@ class DDRDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         img_path = self.images[idx]
         image, mask = self._read_raw(img_path)
+
+        if self.full_res_eval and not self.is_train:
+            # mmseg scores at the ORIGINAL resolution: the image is resized for
+            # inference, then the logits are resized back to `ori_shape` and
+            # compared against the untouched ground truth
+            # (BaseSegmentor.postprocess_result). Resizing the mask down to the
+            # inference size instead -- what the default path does -- measures
+            # something else, and DDR makes it worse because 1024x1024 also
+            # squashes the aspect ratio (0.667/0.750 native -> 1.000).
+            out = self.transform(image=image)
+            mask_t = torch.from_numpy(mask).permute(2, 0, 1).float()
+            return {'image': out['image'], 'mask': mask_t,
+                    'filename': img_path.name}
+
         out = self.transform(image=image, mask=mask)
         return {
             'image': out['image'],                               # [3, H, W] float
