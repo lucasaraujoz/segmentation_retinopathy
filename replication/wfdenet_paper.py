@@ -481,9 +481,16 @@ class WFDENetPaper(nn.Module):
         self.use_hfb = use_hfb
         self.use_ccfam = use_ccfam and use_hfb   # CCFAM lives inside HFB
 
-        self.backbone = EfficientNetB1Features(
-            pretrained=pretrained, variant=backbone_variant
-        )
+        if backbone_variant == 'official':
+            # The authors' own backbone class + the matching mmpretrain ImageNet
+            # weights, i.e. no timm stand-in and BN eps 1e-5 as their config sets.
+            # Imported lazily: it needs the upstream clone, which is gitignored.
+            from replication_2.backbone_official import OfficialEfficientNetB1
+            self.backbone = OfficialEfficientNetB1(pretrained=pretrained)
+        else:
+            self.backbone = EfficientNetB1Features(
+                pretrained=pretrained, variant=backbone_variant
+            )
 
         # Two convs per level to unify channels to C=64 (§3.1).
         # First is a bare 1x1 (no norm, no act), second is 3x3 + BN + ReLU.

@@ -17,3 +17,6 @@ mask_review
 *.png
 # clone read-only do WFDENet oficial (recriar com o SHA no replication_2/README.md)
 replication_2/upstream/
+
+# clone read-only do M2MRF (receita de treino; SHA no replication_2/README.md)
+replication_2/m2mrf/

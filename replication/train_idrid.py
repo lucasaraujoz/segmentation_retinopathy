@@ -54,8 +54,16 @@ DATASETS = {
 }
 
 
-def poly_lr(base_lr: float, it: int, max_iters: int, power: float = POLY_POWER) -> float:
-    return base_lr * (1 - it / max_iters) ** power
+def poly_lr(base_lr: float, it: int, max_iters: int, power: float = POLY_POWER,
+            min_lr: float = 0.0) -> float:
+    """mmseg's poly policy.
+
+    The paper only states power 0.9 and lr 0.01, but M2MRF -- which WFDENet
+    follows for the rest of the recipe -- pins `min_lr=1e-4` in both its
+    schedule files (schedule_40k_idrid.py, schedule_60k_ddr.py). With min_lr=0
+    the tail of training runs at essentially zero lr instead of a small floor.
+    """
+    return (base_lr - min_lr) * (1 - it / max_iters) ** power + min_lr
 
 
 def infinite_loader(loader):
@@ -126,6 +134,11 @@ def main() -> None:
                              'batch_size * accum. Use --batch-size 2 --accum 2 '
                              'to reproduce the paper batch of 4 on a 16GB GPU.')
     parser.add_argument('--lr', type=float, default=BASE_LR)
+    parser.add_argument('--min-lr', type=float, default=0.0,
+                        help='Floor of the poly schedule. The paper does not '
+                             'state one; M2MRF, whose recipe WFDENet follows, '
+                             'pins 1e-4. Default 0.0 keeps earlier runs '
+                             'reproducible; pass 1e-4 for the faithful recipe.')
     parser.add_argument('--out-dir', type=str, default='outputs/repro_wfdenet_idrid')
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--device', type=str, default='cuda')
@@ -140,9 +153,11 @@ def main() -> None:
                              'stays fp32 (its own autocast(False)); bf16 needs '
                              'no GradScaler. Small precision deviation vs fp32.')
     parser.add_argument('--backbone', type=str, default='tf_efficientnet_b1.in1k',
-                        help="timm variant. Default matches the authors' backbone "
-                             '(TF SAME padding + BN eps 1e-3). Use '
-                             "'efficientnet_b1' to reproduce the earlier runs.")
+                        help="timm variant, or 'official' for the authors' own "
+                             'backbone class + the matching mmpretrain ImageNet '
+                             'weights (BN eps 1e-5, no timm stand-in). The timm '
+                             'default has TF SAME padding but eps 1e-3; '
+                             "'efficientnet_b1' reproduces the earliest runs.")
     parser.add_argument('--photometric', action='store_true',
                         help='DEVIATION from the paper (which lists three '
                              'augmentations, none photometric): add colour jitter '
@@ -260,13 +275,13 @@ def main() -> None:
     print(f'\ntraining {args.iters} iters, batch {args.batch_size}'
           f'{f" x accum {args.accum} = eff {eff_batch}" if args.accum > 1 else ""}'
           f'{" bf16-amp" if args.amp else ""}, '
-          f'SGD lr={args.lr} poly^{POLY_POWER}\n')
+          f'SGD lr={args.lr} poly^{POLY_POWER} min_lr={args.min_lr}\n')
 
     for it in range(1, args.iters + 1):
         # One iteration == one optimizer step == one point on the poly LR curve,
         # regardless of accumulation. accum micro-batches make up the effective
         # batch, so the schedule stays identical to the paper's 40k iters.
-        lr = poly_lr(args.lr, it - 1, args.iters)
+        lr = poly_lr(args.lr, it - 1, args.iters, min_lr=args.min_lr)
         for g in optimizer.param_groups:
             g['lr'] = lr
 
