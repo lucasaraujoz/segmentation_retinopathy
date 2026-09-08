@@ -32,6 +32,8 @@ class Config:
     #   'passive'  — WaveletSkipConnection: DWT → upsample details → concat → 1x1 (original)
     #   'idwt'     — ActiveWaveletFusion: DWT → per-band 1x1 → IDWT reconstruct → residual add
     #   'idwt_enh' — 'idwt' + LL conv booster + CBAM-lite denoising on the detail bands
+    #   'hilo'     — HiLoWaveletSkip: LF (LL) and HF (cat[LH,HL,HH]) boosted separately,
+    #                recomposed by IDWT instead of upsample+concat (WFDENet, sem atenção)
     wavelet_fusion: str = 'passive'
     # Deep supervision: auxiliary Dice head on each wavelet-enhanced skip (WFDENet-style), λ below.
     deep_supervision: bool = False
@@ -425,6 +427,23 @@ EXPERIMENTS: dict[str, Config] = {
         deep_supervision=True,
         deepsup_indices=(2, 3),
         bottleneck_attn=True,
+    ),
+
+    # ── Família HL: as ideias do WFDENet trazidas para o skip do H2L1A ───────
+    # Passo 1 (HL0): só a RECOMPOSIÇÃO muda. O H2L1A sobe cada sub-banda para a resolução
+    # cheia, concatena tudo e resolve num 1x1 — a estrutura wavelet se perde ali. Aqui LF (LL)
+    # e HF (cat[LH,HL,HH], bandas misturadas por um conv só, como o HFB do WFDENet) são
+    # realçados em separado e o skip é remontado por IDWT de verdade. Sem atenção: isso é o
+    # passo 2 (HL1, CCFAM no HF), para que o ganho da recomposição não fique confundido com o
+    # ganho do realce. Mesma base do H2L1A em todo o resto (haar, L1, todas as skips).
+    # Nota: `wavelet_include_ll` não se aplica — a LL sempre volta, faz parte da IDWT.
+    'HL0': Config(
+        exp_id='HL0', exp_name='hem_hilo_idwt_L1_allskips',
+        classes=('Hemorrhage',),
+        loss_type='dice_focal_alpha',
+        wavelet_family='haar', wavelet_level=1,
+        wavelet_skip_indices=(0, 1, 2, 3),
+        wavelet_fusion='hilo',
     ),
 
     # ── Wavelet WITHOUT pretraining, hemorrhage-only ─────────────────────────

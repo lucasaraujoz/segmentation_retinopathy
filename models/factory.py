@@ -21,7 +21,7 @@ import segmentation_models_pytorch as smp
 
 from .wavelet import (
     WaveletSkipConnection, ActiveWaveletFusion, AsymmetricWaveletSkip, MultiScaleAsymWaveletSkip,
-    WaveletAttention,
+    HiLoWaveletSkip, WaveletAttention,
 )
 from .wfdenet import WFDENet
 from config import Config
@@ -79,6 +79,10 @@ class WaveletUnet(nn.Module):
                 self.wavelet_modules[key] = AsymmetricWaveletSkip(
                     in_ch, wavelet_family, wavelet_level,
                     use_gate=aws_use_gate, symmetric=aws_symmetric,
+                )
+            elif wavelet_fusion == 'hilo':
+                self.wavelet_modules[key] = HiLoWaveletSkip(
+                    in_ch, wavelet_family, wavelet_level,
                 )
             else:
                 self.wavelet_modules[key] = ActiveWaveletFusion(

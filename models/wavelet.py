@@ -332,6 +332,106 @@ class AsymmetricWaveletSkip(nn.Module):
         return x + self.alpha * self.proj_out(rec)
 
 
+class HiLoWaveletSkip(nn.Module):
+    """LF/HF split + IDWT reconstruction, WITHOUT attention (WFDENet's recomposition, step 1).
+
+    Isolates one question: does it matter HOW the bands are put back together?
+
+    `WaveletSkipConnection` (the H2L1A mechanism) recomposes crudely — it bilinear-upsamples
+    every subband to full resolution, concatenates them with the skip, and lets a 1x1 conv
+    sort it out. The wavelet structure is thrown away at that point: the decoder never sees a
+    proper inverse transform, only a stack of resampled band maps.
+
+    WFDENet instead keeps the two frequency roles apart and rebuilds with the actual inverse:
+
+        LF path:  LL                      → conv                    (semantics)
+        HF path:  cat[LH, HL, HH] (3C)    → conv                    (detail, bands mixed jointly)
+        recompose: IDWT(LL', LH', HL', HH')                          (not an upsample)
+
+    Two deliberate design points, both from WFDENet:
+      * HF bands are processed CONCATENATED (one conv over 3C), so the orientations can mix —
+        unlike `AsymmetricWaveletSkip(symmetric=True)`, which runs an independent 1x1 per band.
+      * Channels are unified to `work_channels` before the DWT (WFDENet's lateral conv). This
+        also avoids running the DWT on the raw 160-ch deep skip, diagnosed as a noise source
+        in H2L2A/H5.
+
+    Unlike `AsymmetricWaveletSkip`, HF is reconstructed as signal (no vessel gate, no zeroing):
+    this module commits to neither polarity, which is what makes it a candidate for lesions
+    whose energy sits in opposite bands (hemorrhage in LL, hard exudate in the details).
+
+        out = x + α · proj_out( IDWT(LL', HF') )
+
+    α is a learnable scalar starting at 0.1 — the same gentle residual as the AWS family, so the
+    block starts close to identity instead of overwriting the skip on step 0.
+    """
+
+    def __init__(self, in_channels: int, wavelet: str = 'haar', level: int = 1,
+                 work_channels: int = 64):
+        super().__init__()
+        self.level = level
+        Cw = work_channels
+
+        filters = _build_2d_filters(wavelet)              # [4,1,L,L]; orthonormal
+        self.register_buffer('filters', filters)
+        self.pad = (filters.shape[-1] - 2) // 2
+
+        self.proj_in = nn.Sequential(
+            nn.Conv2d(in_channels, Cw, 1, bias=False), nn.BatchNorm2d(Cw), nn.ReLU(inplace=True),
+        )
+        # Low-frequency booster: acts on the coarsest approximation only.
+        self.lf_conv = nn.Sequential(
+            nn.Conv2d(Cw, Cw, 3, padding=1, bias=False), nn.BatchNorm2d(Cw), nn.ReLU(inplace=True),
+        )
+        # High-frequency booster: one conv per level over the 3 concatenated bands.
+        self.hf_convs = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(3 * Cw, 3 * Cw, 3, padding=1, bias=False),
+                nn.BatchNorm2d(3 * Cw), nn.ReLU(inplace=True),
+            )
+            for _ in range(level)
+        ])
+        self.proj_out = nn.Conv2d(Cw, in_channels, 1, bias=True)
+        self.alpha = nn.Parameter(torch.tensor(0.1))
+
+    def _dwt_one_level(self, x: torch.Tensor):
+        B, C, H, W = x.shape
+        p = self.pad
+        xp = F.pad(x, (p, p, p, p), mode='reflect') if p > 0 else x
+        xr = xp.reshape(B * C, 1, xp.shape[-2], xp.shape[-1])
+        out = F.conv2d(xr, self.filters, stride=2)
+        out = out.reshape(B, C, 4, out.shape[-2], out.shape[-1])
+        return out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3]
+
+    def _idwt_one_level(self, ll, lh, hl, hh, out_size):
+        B, C = ll.shape[:2]
+        coeffs = torch.stack([ll, lh, hl, hh], dim=2).reshape(B * C, 4, ll.shape[-2], ll.shape[-1])
+        rec = F.conv_transpose2d(coeffs, self.filters, stride=2)
+        rec = rec.reshape(B, C, rec.shape[-2], rec.shape[-1])
+        Ht, Wt = out_size
+        top = (rec.shape[-2] - Ht) // 2
+        left = (rec.shape[-1] - Wt) // 2
+        return rec[..., top:top + Ht, left:left + Wt]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        u = self.proj_in(x)
+
+        approx = u
+        sizes, details = [], []
+        for _ in range(self.level):
+            sizes.append(approx.shape[-2:])
+            approx, lh, hl, hh = self._dwt_one_level(approx)
+            details.append((lh, hl, hh))
+
+        ll = self.lf_conv(approx)                          # LFB: boost the coarsest LL
+        for lvl in reversed(range(self.level)):
+            lh, hl, hh = details[lvl]
+            hf = torch.cat([lh, hl, hh], dim=1)            # [B, 3Cw, h, w] — bands mixed jointly
+            lh, hl, hh = torch.chunk(self.hf_convs[lvl](hf), 3, dim=1)   # HFB
+            ll = self._idwt_one_level(ll, lh, hl, hh, sizes[lvl])
+
+        return x + self.alpha * self.proj_out(ll)
+
+
 class MultiScaleAsymWaveletSkip(nn.Module):
     """Multi-scale asymmetric wavelet skip — sees ALL skips at once and fuses ACROSS levels.
 
