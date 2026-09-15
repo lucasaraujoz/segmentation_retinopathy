@@ -21,10 +21,28 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 import torch
-from sklearn.metrics import auc, average_precision_score
 
 THRESHOLD_NUM = 11
 DICE_THRESHOLD = 0.5
+
+
+def _auc(x: np.ndarray, y: np.ndarray) -> float:
+    """sklearn.metrics.auc, inlined: trapezoid rule with its direction check.
+
+    Importing sklearn here wedges this environment -- sklearn.metrics pulls
+    scipy.optimize, whose bundled HiGHS extension never finishes loading (the
+    process spins at 100% in kernel mode and ignores SIGKILL). sklearn was only
+    ever used for this function plus average_precision_score below, so the
+    dependency is not worth the import.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    dx = np.diff(x)
+    if np.any(dx < 0):
+        if np.any(dx > 0):
+            raise ValueError(f'x is neither increasing nor decreasing: {x}')
+        x, y = x[::-1], y[::-1]
+    return float(np.trapezoid(y, x))
 
 
 class SegEvaluator:
@@ -120,7 +138,7 @@ class SegEvaluator:
         out: Dict[str, float] = {}
         aupr = np.zeros(self.num_classes)
         for c, name in enumerate(self.class_names):
-            aupr[c] = auc(recall[:, c], ppv[:, c])
+            aupr[c] = _auc(recall[:, c], ppv[:, c])
             out[f'AUPR_{name}'] = float(aupr[c] * 100)
             out[f'Dice_{name}'] = float(dice[c] * 100)
             out[f'IoU_{name}'] = float(iou[c] * 100)
@@ -139,6 +157,10 @@ class SegEvaluator:
         # per class the peak is ~1.2 GB. IDRiD never hit this -- it is 7x
         # smaller.
         if self.keep_probs and self._probs:
+            # Imported here, not at module scope: this is the one sklearn
+            # call left, and --full-res-eval (which sets keep_probs=False)
+            # is the path that must not touch sklearn at all. See _auc.
+            from sklearn.metrics import average_precision_score
             ap = []
             for c, name in enumerate(self.class_names):
                 y_true = torch.cat([g[:, c] for g in self._gts]).numpy().ravel()
