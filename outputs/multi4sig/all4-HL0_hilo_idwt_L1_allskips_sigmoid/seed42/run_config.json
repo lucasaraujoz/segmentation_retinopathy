@@ -1,0 +1,110 @@
+{
+  "exp_id": "all4-HL0",
+  "exp_name": "hilo_idwt_L1_allskips_sigmoid",
+  "defined_in": "experiments/multi_lesion.py",
+  "group": "multi4sig",
+  "seed": 42,
+  "classes": [
+    "HardExudate",
+    "Hemorrhage",
+    "SoftExudate",
+    "Microaneurysms"
+  ],
+  "started_at": "2026-09-14T00:20:26",
+  "argv": [
+    "train.py",
+    "--exp",
+    "all4-HL0",
+    "--suffixes",
+    "3",
+    "--no-tta"
+  ],
+  "git_commit": "b2af38b3c747aa00b8a7501175297539cef509d8",
+  "git_branch": "feature/wavelet-hilo-idwt",
+  "git_dirty": true,
+  "protocol": {
+    "suffixes": [
+      "3"
+    ],
+    "tta": false,
+    "hd95": true,
+    "folds": 5,
+    "eval_only": false,
+    "device": "cuda"
+  },
+  "config": {
+    "dataset_name": "fgadr",
+    "fgadr_path": "/home/lucas/fgadr/Seg-set",
+    "presence_csv": "outputs/fgadr_class_presence.csv",
+    "image_size": [
+      512,
+      512
+    ],
+    "classes": [
+      "HardExudate",
+      "Hemorrhage",
+      "SoftExudate",
+      "Microaneurysms"
+    ],
+    "bin_threshold": 127,
+    "apply_clahe": false,
+    "input_preproc": "none",
+    "allowed_suffixes": [
+      "3"
+    ],
+    "encoder_name": "efficientnet-b4",
+    "encoder_weights": "imagenet",
+    "wavelet_family": "haar",
+    "wavelet_level": 1,
+    "wavelet_skip_indices": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "wavelet_include_ll": false,
+    "wavelet_fusion": "hilo",
+    "deep_supervision": false,
+    "deepsup_weight": 0.5,
+    "arch": "unet",
+    "wfdenet_use_lfb": true,
+    "wfdenet_use_hfb": true,
+    "wfdenet_use_ccfam": true,
+    "wfdenet_use_sd": true,
+    "aws_use_gate": true,
+    "aws_symmetric": false,
+    "deepsup_indices": [],
+    "bottleneck_attn": false,
+    "attn_heads": 4,
+    "batch_size": 4,
+    "num_workers": 0,
+    "num_epochs": 150,
+    "learning_rate": 0.0003,
+    "scheduler_pct_start": 0.15,
+    "weight_decay": 1e-05,
+    "pos_weight": [
+      136.8,
+      89.4
+    ],
+    "accumulation_steps": 8,
+    "loss_type": "dice_focal_alpha",
+    "dice_weight": 0.5,
+    "focal_weight": 0.5,
+    "focal_gamma": 2.0,
+    "focal_alpha": 0.75,
+    "tversky_alpha": 0.3,
+    "tversky_beta": 0.7,
+    "tversky_gamma": 1.333,
+    "n_folds": 5,
+    "test_fraction": 0.15,
+    "random_seed": 42,
+    "task": "multilabel",
+    "exp_id": "all4-HL0",
+    "exp_name": "hilo_idwt_L1_allskips_sigmoid",
+    "task_group": "",
+    "seed": 42,
+    "use_wandb": true,
+    "wandb_project": "fgadr-wavelet-ablation",
+    "output_dir": "outputs"
+  }
+}

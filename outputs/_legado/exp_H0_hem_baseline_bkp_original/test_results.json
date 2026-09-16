@@ -1,0 +1,216 @@
+{
+  "exp_id": "H0",
+  "exp_name": "hem_baseline",
+  "cv_dice_mean": NaN,
+  "cv_dice_std": 0.0,
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_val_dice": NaN,
+      "best_epoch": -1,
+      "checkpoint": "outputs/exp_H0_hem_baseline/model_best_fold0.pth"
+    },
+    {
+      "fold": 1,
+      "best_val_dice": NaN,
+      "best_epoch": -1,
+      "checkpoint": "outputs/exp_H0_hem_baseline/model_best_fold1.pth"
+    },
+    {
+      "fold": 2,
+      "best_val_dice": NaN,
+      "best_epoch": -1,
+      "checkpoint": "outputs/exp_H0_hem_baseline/model_best_fold2.pth"
+    },
+    {
+      "fold": 3,
+      "best_val_dice": NaN,
+      "best_epoch": -1,
+      "checkpoint": "outputs/exp_H0_hem_baseline/model_best_fold3.pth"
+    },
+    {
+      "fold": 4,
+      "best_val_dice": NaN,
+      "best_epoch": -1,
+      "checkpoint": "outputs/exp_H0_hem_baseline/model_best_fold4.pth"
+    }
+  ],
+  "test_dice_Hemorrhage": 0.6391945828994116,
+  "test_iou_Hemorrhage": 0.4957858920097351,
+  "test_dice_mean": 0.6391945828994116,
+  "test_iou_mean": 0.4957858920097351,
+  "test_hd95_Hemorrhage": 49.188740926283906,
+  "test_lesion_dice_Hemorrhage": 0.3788949408702972,
+  "test_lesion_hd95_Hemorrhage": 344.41266618387283,
+  "test_sensitivity_Hemorrhage": 0.6411042944785276,
+  "test_fp_per_image_Hemorrhage": 4.932584269662922,
+  "froc": {
+    "Hemorrhage": [
+      {
+        "threshold": 0.9,
+        "sensitivity": 0.5778374233128835,
+        "fp_per_image": 3.056179775280899
+      },
+      {
+        "threshold": 0.7,
+        "sensitivity": 0.6138803680981595,
+        "fp_per_image": 4.224719101123595
+      },
+      {
+        "threshold": 0.5,
+        "sensitivity": 0.6411042944785276,
+        "fp_per_image": 4.932584269662922
+      },
+      {
+        "threshold": 0.3,
+        "sensitivity": 0.6671779141104295,
+        "fp_per_image": 5.797752808988764
+      },
+      {
+        "threshold": 0.1,
+        "sensitivity": 0.6990030674846626,
+        "fp_per_image": 7.280898876404494
+      }
+    ]
+  },
+  "per_model_test": {
+    "dice_Hemorrhage": {
+      "mean": 0.623634535074234,
+      "std": 0.008814274328433704,
+      "values": [
+        0.6249406139055887,
+        0.6231053421894709,
+        0.6378169233600298,
+        0.6100951458017031,
+        0.6222146501143774
+      ]
+    },
+    "iou_Hemorrhage": {
+      "mean": 0.4785211617747942,
+      "std": 0.010385321311940497,
+      "values": [
+        0.4762316793203354,
+        0.476422943174839,
+        0.4973891054590543,
+        0.46541622032721836,
+        0.47714586059252423
+      ]
+    },
+    "dice_mean": {
+      "mean": 0.623634535074234,
+      "std": 0.008814274328433704,
+      "values": [
+        0.6249406139055887,
+        0.6231053421894709,
+        0.6378169233600298,
+        0.6100951458017031,
+        0.6222146501143774
+      ]
+    },
+    "iou_mean": {
+      "mean": 0.4785211617747942,
+      "std": 0.010385321311940497,
+      "values": [
+        0.4762316793203354,
+        0.476422943174839,
+        0.4973891054590543,
+        0.46541622032721836,
+        0.47714586059252423
+      ]
+    },
+    "hd95_Hemorrhage": {
+      "mean": 51.06290621767642,
+      "std": 4.253049639740434,
+      "values": [
+        47.6080630047202,
+        55.145821159721656,
+        48.92932811117889,
+        57.114271954853194,
+        46.51704685790816
+      ]
+    },
+    "lesion_dice_Hemorrhage": {
+      "mean": 0.3686333700467625,
+      "std": 0.008450040424510287,
+      "values": [
+        0.36604062642492574,
+        0.35933980393163806,
+        0.3835956825481663,
+        0.3628928971678245,
+        0.3712978401612579
+      ]
+    },
+    "lesion_hd95_Hemorrhage": {
+      "mean": 351.1491743283874,
+      "std": 6.033045065767306,
+      "values": [
+        350.1895356612971,
+        355.94551471467685,
+        341.1114089585299,
+        358.6131364290448,
+        349.88627587838835
+      ]
+    },
+    "sensitivity_Hemorrhage": {
+      "mean": 0.6383435582822086,
+      "std": 0.006170335180948326,
+      "values": [
+        0.6365030674846626,
+        0.6499233128834356,
+        0.633819018404908,
+        0.6326687116564417,
+        0.6388036809815951
+      ]
+    },
+    "fp_per_image_Hemorrhage": {
+      "mean": 5.343820224719101,
+      "std": 0.6012065468335831,
+      "values": [
+        5.573033707865169,
+        6.168539325842697,
+        4.348314606741573,
+        5.51685393258427,
+        5.112359550561798
+      ]
+    }
+  },
+  "per_model_froc": {
+    "Hemorrhage": [
+      {
+        "threshold": 0.9,
+        "sensitivity_mean": 0.5789877300613497,
+        "sensitivity_std": 0.011004000004952686,
+        "fp_per_image_mean": 3.573033707865168,
+        "fp_per_image_std": 0.4892997193713137
+      },
+      {
+        "threshold": 0.7,
+        "sensitivity_mean": 0.614877300613497,
+        "sensitivity_std": 0.008335998921289098,
+        "fp_per_image_mean": 4.55505617977528,
+        "fp_per_image_std": 0.5605198950153253
+      },
+      {
+        "threshold": 0.5,
+        "sensitivity_mean": 0.6383435582822086,
+        "sensitivity_std": 0.006170335180948326,
+        "fp_per_image_mean": 5.343820224719101,
+        "fp_per_image_std": 0.6012065468335831
+      },
+      {
+        "threshold": 0.3,
+        "sensitivity_mean": 0.6600460122699386,
+        "sensitivity_std": 0.0048658564660169585,
+        "fp_per_image_mean": 6.215730337078651,
+        "fp_per_image_std": 0.6356969341572741
+      },
+      {
+        "threshold": 0.1,
+        "sensitivity_mean": 0.6937883435582821,
+        "sensitivity_std": 0.00810710140270092,
+        "fp_per_image_mean": 7.853932584269662,
+        "fp_per_image_std": 0.6986198452453848
+      }
+    ]
+  }
+}

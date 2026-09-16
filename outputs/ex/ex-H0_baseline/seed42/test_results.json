@@ -1,0 +1,240 @@
+{
+  "exp_id": "ex-H0",
+  "exp_name": "baseline",
+  "cv_dice_mean": 0.5602408467531205,
+  "cv_dice_std": 0.00639351788415473,
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_val_dice": 0.554587470293045,
+      "best_epoch": 109,
+      "checkpoint": "outputs/ex/ex-H0_baseline/seed42/model_best_fold0.pth"
+    },
+    {
+      "fold": 1,
+      "best_val_dice": 0.5509048044681549,
+      "best_epoch": 63,
+      "checkpoint": "outputs/ex/ex-H0_baseline/seed42/model_best_fold1.pth"
+    },
+    {
+      "fold": 2,
+      "best_val_dice": 0.5629759764671326,
+      "best_epoch": 32,
+      "checkpoint": "outputs/ex/ex-H0_baseline/seed42/model_best_fold2.pth"
+    },
+    {
+      "fold": 3,
+      "best_val_dice": 0.567529513835907,
+      "best_epoch": 91,
+      "checkpoint": "outputs/ex/ex-H0_baseline/seed42/model_best_fold3.pth"
+    },
+    {
+      "fold": 4,
+      "best_val_dice": 0.5652064687013626,
+      "best_epoch": 86,
+      "checkpoint": "outputs/ex/ex-H0_baseline/seed42/model_best_fold4.pth"
+    }
+  ],
+  "test_dice_HardExudate": 0.5899705899798352,
+  "test_iou_HardExudate": 0.4571026615474535,
+  "test_dice_mean": 0.5899705899798352,
+  "test_iou_mean": 0.4571026615474535,
+  "test_hd95_HardExudate": 53.839091719891364,
+  "test_aupr_HardExudate": 0.7317338975983243,
+  "test_lesion_dice_HardExudate": 0.38054741110895796,
+  "test_lesion_hd95_HardExudate": 303.07281028821154,
+  "test_sensitivity_HardExudate": 0.8018147086914995,
+  "test_fp_per_image_HardExudate": 3.7752808988764044,
+  "test_mAUPR": 0.7317338975983243,
+  "froc": {
+    "HardExudate": [
+      {
+        "threshold": 0.9,
+        "sensitivity": 0.7464183381088825,
+        "fp_per_image": 2.247191011235955
+      },
+      {
+        "threshold": 0.7,
+        "sensitivity": 0.7793696275071633,
+        "fp_per_image": 3.1235955056179776
+      },
+      {
+        "threshold": 0.5,
+        "sensitivity": 0.8018147086914995,
+        "fp_per_image": 3.7752808988764044
+      },
+      {
+        "threshold": 0.3,
+        "sensitivity": 0.8170964660936008,
+        "fp_per_image": 4.640449438202247
+      },
+      {
+        "threshold": 0.1,
+        "sensitivity": 0.8457497612225406,
+        "fp_per_image": 6.202247191011236
+      }
+    ]
+  },
+  "per_model_test": {
+    "dice_HardExudate": {
+      "mean": 0.572980978048366,
+      "std": 0.022400681473032168,
+      "values": [
+        0.5935778566028761,
+        0.5841159742811451,
+        0.5335926361705946,
+        0.5630255095336748,
+        0.5905929136535396
+      ]
+    },
+    "iou_HardExudate": {
+      "mean": 0.4402625756419224,
+      "std": 0.023831626441864814,
+      "values": [
+        0.4624044823905696,
+        0.45335772244826605,
+        0.3982899487018585,
+        0.42960182350614795,
+        0.45765890116276947
+      ]
+    },
+    "dice_mean": {
+      "mean": 0.572980978048366,
+      "std": 0.022400681473032168,
+      "values": [
+        0.5935778566028761,
+        0.5841159742811451,
+        0.5335926361705946,
+        0.5630255095336748,
+        0.5905929136535396
+      ]
+    },
+    "iou_mean": {
+      "mean": 0.4402625756419224,
+      "std": 0.023831626441864814,
+      "values": [
+        0.4624044823905696,
+        0.45335772244826605,
+        0.3982899487018585,
+        0.42960182350614795,
+        0.45765890116276947
+      ]
+    },
+    "hd95_HardExudate": {
+      "mean": 56.571506004809784,
+      "std": 6.92746375481018,
+      "values": [
+        50.91130145869946,
+        63.91924839129508,
+        64.15153334329969,
+        57.11077087623513,
+        46.764675954519554
+      ]
+    },
+    "aupr_HardExudate": {
+      "mean": 0.7025938984371423,
+      "std": 0.017624502393809634,
+      "values": [
+        0.7189811986498045,
+        0.7068409237320952,
+        0.6748794393660071,
+        0.6907492454654123,
+        0.7215186849723924
+      ]
+    },
+    "lesion_dice_HardExudate": {
+      "mean": 0.3614012322049215,
+      "std": 0.01901372333380682,
+      "values": [
+        0.383173705439625,
+        0.3563462374005189,
+        0.34330249167136095,
+        0.339961607265666,
+        0.3842221192474367
+      ]
+    },
+    "lesion_hd95_HardExudate": {
+      "mean": 314.6685153449195,
+      "std": 16.539847346222412,
+      "values": [
+        286.58996328195894,
+        324.8996819359919,
+        333.048618636536,
+        322.67200541393106,
+        306.1323074561798
+      ]
+    },
+    "sensitivity_HardExudate": {
+      "mean": 0.8020057306590257,
+      "std": 0.012712651867793577,
+      "values": [
+        0.7917860553963706,
+        0.7908309455587392,
+        0.7951289398280802,
+        0.8242597898758357,
+        0.8080229226361032
+      ]
+    },
+    "fp_per_image_HardExudate": {
+      "mean": 4.258426966292134,
+      "std": 0.6588908133378569,
+      "values": [
+        3.235955056179775,
+        4.033707865168539,
+        4.932584269662922,
+        5.022471910112359,
+        4.067415730337078
+      ]
+    },
+    "mAUPR": {
+      "mean": 0.7025938984371423,
+      "std": 0.017624502393809634,
+      "values": [
+        0.7189811986498045,
+        0.7068409237320952,
+        0.6748794393660071,
+        0.6907492454654123,
+        0.7215186849723924
+      ]
+    }
+  },
+  "per_model_froc": {
+    "HardExudate": [
+      {
+        "threshold": 0.9,
+        "sensitivity_mean": 0.7448901623686724,
+        "sensitivity_std": 0.01869040382268283,
+        "fp_per_image_mean": 2.6269662921348313,
+        "fp_per_image_std": 0.388341655320952
+      },
+      {
+        "threshold": 0.7,
+        "sensitivity_mean": 0.7821394460362943,
+        "sensitivity_std": 0.013999447305119556,
+        "fp_per_image_mean": 3.5640449438202246,
+        "fp_per_image_std": 0.5389230705773366
+      },
+      {
+        "threshold": 0.5,
+        "sensitivity_mean": 0.8020057306590257,
+        "sensitivity_std": 0.012712651867793577,
+        "fp_per_image_mean": 4.258426966292134,
+        "fp_per_image_std": 0.6588908133378569
+      },
+      {
+        "threshold": 0.3,
+        "sensitivity_mean": 0.8207258834765998,
+        "sensitivity_std": 0.011009065164025817,
+        "fp_per_image_mean": 5.044943820224719,
+        "fp_per_image_std": 0.694923609744903
+      },
+      {
+        "threshold": 0.1,
+        "sensitivity_mean": 0.8436485195797516,
+        "sensitivity_std": 0.010421644568828523,
+        "fp_per_image_mean": 6.258426966292134,
+        "fp_per_image_std": 0.8353084366389232
+      }
+    ]
+  }
+}

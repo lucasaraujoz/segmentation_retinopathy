@@ -1,0 +1,19 @@
+{
+  "exp_id": "H2",
+  "exp_name": "hem_haar_ll",
+  "cv_dice_mean": 0.5562572318774003,
+  "cv_dice_std": 0.0,
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_val_dice": 0.5562572318774003,
+      "best_epoch": 109,
+      "checkpoint": "outputs/exp_H2_hem_haar_ll/model_best_fold0.pth"
+    }
+  ],
+  "test_dice_Hemorrhage": 0.6338239113489786,
+  "test_iou_Hemorrhage": 0.4875355362892151,
+  "test_dice_mean": 0.6338239113489786,
+  "test_iou_mean": 0.4875355362892151,
+  "test_hd95_Hemorrhage": 49.323292954356056
+}

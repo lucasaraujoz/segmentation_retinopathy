@@ -1,0 +1,19 @@
+{
+  "exp_id": "H3",
+  "exp_name": "hem_illumnorm",
+  "cv_dice_mean": 0.535714525442857,
+  "cv_dice_std": 0.0,
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_val_dice": 0.535714525442857,
+      "best_epoch": 49,
+      "checkpoint": "outputs/exp_H3_hem_illumnorm/model_best_fold0.pth"
+    }
+  ],
+  "test_dice_Hemorrhage": 0.5860742429892222,
+  "test_iou_Hemorrhage": 0.4364632765452067,
+  "test_dice_mean": 0.5860742429892222,
+  "test_iou_mean": 0.4364632765452067,
+  "test_hd95_Hemorrhage": 59.874623822568516
+}

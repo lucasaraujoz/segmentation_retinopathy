@@ -1,0 +1,19 @@
+{
+  "exp_id": "H0",
+  "exp_name": "hem_baseline",
+  "cv_dice_mean": 0.5409962626603934,
+  "cv_dice_std": 0.0,
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_val_dice": 0.5409962626603934,
+      "best_epoch": 87,
+      "checkpoint": "outputs/exp_H0_hem_baseline/model_best_fold0.pth"
+    }
+  ],
+  "test_dice_Hemorrhage": 0.6415886382261912,
+  "test_iou_Hemorrhage": 0.4961901629964511,
+  "test_dice_mean": 0.6415886382261912,
+  "test_iou_mean": 0.4961901629964511,
+  "test_hd95_Hemorrhage": 49.27694045852908
+}

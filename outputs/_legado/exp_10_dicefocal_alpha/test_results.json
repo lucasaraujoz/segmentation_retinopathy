@@ -1,0 +1,22 @@
+{
+  "exp_id": "10",
+  "exp_name": "dicefocal_alpha",
+  "cv_dice_mean": 0.5661154292523861,
+  "cv_dice_std": 0.0,
+  "fold_results": [
+    {
+      "fold": 0,
+      "best_val_dice": 0.5661154292523861,
+      "best_epoch": 141,
+      "checkpoint": "outputs/exp_10_dicefocal_alpha/model_best_fold0.pth"
+    }
+  ],
+  "test_dice_HardExudate": 0.6220058117594037,
+  "test_iou_HardExudate": 0.5239478009087699,
+  "test_dice_Hemorrhage": 0.603142603806087,
+  "test_iou_Hemorrhage": 0.48869513826710836,
+  "test_dice_mean": 0.6125742026737758,
+  "test_iou_mean": 0.5063214685235705,
+  "test_hd95_HardExudate": 42.45230539314752,
+  "test_hd95_Hemorrhage": 65.72285291621036
+}
