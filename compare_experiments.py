@@ -1,8 +1,11 @@
 """
 Paired comparison of two (or more) experiments on the detection metrics that
 train.py now writes at test time. NO torch — reads only the sidecar files:
-  - outputs/exp_<id>_*/test_scores.npz   (per-image pixel/lesion Dice, per-lesion hits)
-  - outputs/exp_<id>_*/test_results.json (aggregate metrics + FROC curve)
+  - <run_dir>/test_scores.npz   (per-image pixel/lesion Dice, per-lesion hits)
+  - <run_dir>/test_results.json (aggregate metrics + FROC curve)
+
+A run is named either by its directory (outputs/hem/HL0_hilo_idwt/seed42) or by a bare
+experiment id (HL0), which is resolved under outputs/ and must match exactly one run.
 
 What it adds on top of the per-run numbers (which are already in test_results.json):
   - a side-by-side table,
@@ -17,23 +20,60 @@ Usage:
 
 from __future__ import annotations
 import sys
-import glob
 import json
+from pathlib import Path
+
 import numpy as np
 
 
-def load_scores(exp_id: str, cls: str) -> dict:
-    npz = glob.glob(f'outputs/exp_{exp_id}_*/test_scores.npz')
-    js  = glob.glob(f'outputs/exp_{exp_id}_*/test_results.json')
-    if not npz or not js:
+def resolve_run(ref: str) -> Path:
+    """Resolve a run reference to exactly one output directory.
+
+    Accepts either a path to the directory itself (outputs/hem/HL0_.../seed42) or a
+    bare experiment id (HL0), searched recursively under outputs/. Ambiguity is an
+    error: picking the first match silently is how a TTA/all-suffix run gets compared
+    against a protocol-correct one without anybody noticing.
+    """
+    p = Path(ref)
+    if p.is_dir():
+        return p
+
+    seen, matches = set(), []
+    for hit in sorted(Path('outputs').rglob('test_scores.npz')):
+        run = hit.parent
+        if '_descartado' in run.parts:
+            continue          # protocol-invalid runs are kept, but never resolved by id
+        # Match the run dir or, in the seed<N> layout, the experiment dir above it.
+        names = [run.name, run.parent.name]
+        if any(n == ref or n.startswith(f'{ref}_') or n.startswith(f'exp_{ref}_') for n in names):
+            if run not in seen:
+                seen.add(run)
+                matches.append(run)
+
+    if not matches:
         raise FileNotFoundError(
-            f'missing sidecars for exp {exp_id} (run: python train.py --exp {exp_id} --eval-only ...)')
-    d = np.load(npz[0], allow_pickle=True)
-    j = json.load(open(js[0]))
+            f'no run with test_scores.npz matches {ref!r} under outputs/ '
+            f'(run: python train.py --exp {ref} --eval-only ...)')
+    if len(matches) > 1:
+        listing = '\n  '.join(str(m) for m in matches)
+        raise ValueError(
+            f'{ref!r} is ambiguous, {len(matches)} runs match. Pass the directory itself:\n  {listing}')
+    return matches[0]
+
+
+def load_scores(exp_id: str, cls: str) -> dict:
+    run = resolve_run(exp_id)
+    npz_path, js_path = run / 'test_scores.npz', run / 'test_results.json'
+    if not npz_path.exists() or not js_path.exists():
+        raise FileNotFoundError(
+            f'missing sidecars in {run}/ (run: python train.py --exp {exp_id} --eval-only ...)')
+    d = np.load(npz_path, allow_pickle=True)
+    j = json.load(open(js_path))
     if f'pixdice_{cls}' not in d:
-        raise KeyError(f'class "{cls}" not in {npz[0]} (classes present: '
+        raise KeyError(f'class "{cls}" not in {npz_path} (classes present: '
                        f'{[k[8:] for k in d.files if k.startswith("pixdice_")]})')
     return {
+        'run_dir': run,
         'files': d['files'],
         'pixdice': d[f'pixdice_{cls}'], 'lesdice': d[f'lesdice_{cls}'], 'hits': d[f'hits_{cls}'],
         'froc': j.get('froc', {}).get(cls, []),

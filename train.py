@@ -23,13 +23,17 @@ Arguments
                       E.g. "3" (precise annotations only), "1,3", or omit for all.
                       Each combination gets its own cv_splits_<tag>.json cache.
 
+  --seed N            Training seed: model init, augmentation, batch order. Also names
+                      the output directory (.../seed<N>). Does NOT touch the patient
+                      split, which is pinned by config.random_seed and must stay 42.
+
   --device DEV        Force device: "cuda", "cpu", "cuda:1", etc.
                       (default: cuda if available, else cpu)
 
   --workers N         DataLoader num_workers (0 = single-process, safer for debug)
 
   --no-wandb          Disable Weights & Biases logging entirely; metrics go to
-                      CSV only under outputs/exp_<id>_<name>/metrics_fold<N>.csv
+                      CSV only under outputs/<group>/<id>_<name>/seed<N>/metrics_fold<N>.csv
 
   --no-tta            Disable test-time augmentation (faster, for smoke-tests)
 
@@ -52,12 +56,19 @@ Notes
 - Experiment configs live in config.py → EXPERIMENTS dict.
 - To add a new dataset: see the registry in dataset.py (_DATASET_REGISTRY, _LOADER_REGISTRY).
 - Splits are deterministic and cached: outputs/cv_splits_<suffix_tag>.json.
+- Results go to outputs/<group>/<id>_<name>/seed<N>/, with a run_config.json recording
+  the config, argv and git commit that produced them.
 """
 
 from __future__ import annotations
 import argparse
+import dataclasses
+import json
 import math
+import subprocess
 import sys
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -76,6 +87,109 @@ from metrics import compute_batch_metrics, compute_hd95_epoch
 from metrics_detection import evaluate_class
 from models import build_model
 from reporter import Reporter
+
+
+# ── Console log ───────────────────────────────────────────────────────────────
+
+class _TeeStream:
+    """Mirror a stream to a file, collapsing carriage-return progress redraws.
+
+    tqdm redraws a bar by writing '\r' plus the whole line, hundreds of times per epoch.
+    Copied verbatim that is tens of MB of noise per run (the old nohup.out reached 93MB),
+    so only the text after the last '\r' survives into the file: one line per finished
+    bar instead of one per frame. The terminal still gets everything, unchanged.
+    """
+
+    def __init__(self, stream, fh):
+        self._stream, self._fh, self._buf = stream, fh, ''
+
+    def write(self, text):
+        self._stream.write(text)
+        self._buf += text
+        while '\n' in self._buf:
+            line, self._buf = self._buf.split('\n', 1)
+            self._fh.write(line.rsplit('\r', 1)[-1] + '\n')
+        if '\r' in self._buf:                 # unfinished line: keep only the last redraw
+            self._buf = self._buf.rsplit('\r', 1)[-1]
+        return len(text)
+
+    def flush(self):
+        self._stream.flush()
+        self._fh.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)    # isatty(), encoding, fileno()...
+
+
+@contextmanager
+def tee_to(path: Path):
+    """Duplicate stdout and stderr into `path` for the duration of the block.
+
+    Lives here rather than in the shell command so the log always lands next to the run
+    it describes: the directory comes from Config, not from a path retyped by hand.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    saved_out, saved_err = sys.stdout, sys.stderr
+    with open(path, 'a', buffering=1) as fh:
+        fh.write(f'\n===== {datetime.now().isoformat(timespec="seconds")} '
+                 f'| {" ".join(sys.argv)} =====\n')
+        sys.stdout, sys.stderr = _TeeStream(saved_out, fh), _TeeStream(saved_err, fh)
+        try:
+            yield path
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+
+
+# ── Run manifest ──────────────────────────────────────────────────────────────
+
+def _git(*args) -> str | None:
+    """Best-effort git query; None when this is not a checkout or git is missing."""
+    try:
+        return subprocess.check_output(['git', *args], stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return None
+
+
+def write_run_manifest(config, args, use_tta: bool, use_hd95: bool, device) -> Path:
+    """Record what produced this directory, next to its checkpoints.
+
+    Without this an output directory is anonymous: reconstructing which suffixes, which
+    TTA setting and which code produced a run means grepping nohup logs after the fact.
+    Written before training so an interrupted run still says what it was doing.
+    """
+    config.exp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from experiments import origin
+        defined_in = f'experiments/{origin(config.exp_id)}.py'
+    except (ImportError, KeyError):
+        defined_in = None
+
+    manifest = {
+        'exp_id': config.exp_id,
+        'exp_name': config.exp_name,
+        'defined_in': defined_in,       # which family module produced this Config
+        'group': config.group,
+        'seed': config.seed,
+        'classes': list(config.classes),
+        'started_at': datetime.now().isoformat(timespec='seconds'),
+        'argv': sys.argv,
+        'git_commit': _git('rev-parse', 'HEAD'),
+        'git_branch': _git('rev-parse', '--abbrev-ref', 'HEAD'),
+        'git_dirty': bool(_git('status', '--porcelain')),
+        'protocol': {
+            'suffixes': list(config.allowed_suffixes) if config.allowed_suffixes else None,
+            'tta': use_tta,
+            'hd95': use_hd95,
+            'folds': args.folds or config.n_folds,
+            'eval_only': args.eval_only,
+            'device': str(device),
+        },
+        'config': dataclasses.asdict(config),
+    }
+    path = config.exp_dir / 'run_config.json'
+    with open(path, 'w') as f:
+        json.dump(manifest, f, indent=2, default=str)
+    return path
 
 
 # ── TTA ───────────────────────────────────────────────────────────────────────
@@ -297,11 +411,17 @@ def train_fold(config: Config, fold_idx: int, train_df: pd.DataFrame, val_df: pd
             best_epoch = epoch
             ckpt_path  = reporter.save_checkpoint(model, epoch, val_m)
 
-        dice_he  = val_m.get('dice_HardExudate', float('nan'))
-        dice_hem = val_m.get('dice_Hemorrhage',  float('nan'))
+        # Per-class breakdown, driven by config.classes. It used to be hardcoded to
+        # "HE=<HardExudate> HEM=<Hemorrhage>", which printed nan for every other lesion
+        # and, worse, read as Hemorrhage to anyone coming from the WFDENet tables, where
+        # HE means exactly that.
+        per_class = ' '.join(
+            f'{code}={val_m[f"dice_{name}"]:.4f}'
+            for name, code in zip(config.classes, config.class_codes)
+        )
         print(
             f'         val loss={val_loss:.4f} | '
-            f'Dice={val_m["dice_mean"]:.4f} (HE={dice_he:.4f} HEM={dice_hem:.4f}) | '
+            f'Dice={val_m["dice_mean"]:.4f} ({per_class}) | '
             f'best={best_dice:.4f} ep{best_epoch}'
         )
 
@@ -323,48 +443,19 @@ def train_fold(config: Config, fold_idx: int, train_df: pd.DataFrame, val_df: pd
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default='00',
-                        help='Experiment ID from config.EXPERIMENTS')
-    parser.add_argument('--epochs', type=int, default=None,
-                        help='Override num_epochs (e.g. 2 for smoke-test)')
-    parser.add_argument('--folds', type=int, default=None,
-                        help='Run only first N folds from fold-0 (e.g. --folds 1 = fold-0 only, default = all 5)')
-    parser.add_argument('--suffixes', type=str, default=None,
-                        help='Comma-separated filename suffixes to include, e.g. "3" or "1,3" (default: all)')
-    parser.add_argument('--device', type=str, default=None)
-    parser.add_argument('--workers', type=int, default=None,
-                        help='DataLoader num_workers (0 = single-process, safer for debug)')
-    parser.add_argument('--overwrite', action='store_true',
-                        help='Overwrite existing experiment outputs without asking')
-    parser.add_argument('--no-wandb', action='store_true',
-                        help='Disable W&B; log to CSV only (outputs/exp_.../metrics_fold<N>.csv)')
-    parser.add_argument('--no-tta', action='store_true',
-                        help='Disable test-time augmentation (faster, for smoke tests)')
-    parser.add_argument('--no-hd95', action='store_true',
-                        help='Skip Hausdorff95 in test evaluation (faster, for smoke tests)')
-    parser.add_argument('--eval-only', action='store_true',
-                        help='Skip training; load existing model_best_fold*.pth and only run test eval '
-                             '(computes pixel + lesion-wise detection metrics into test_results.json).')
-    args = parser.parse_args()
+def run_experiment(config: Config, args, use_tta: bool, use_hd95: bool, device) -> None:
+    """One complete run: guard, manifest, 5-fold training and test evaluation.
 
-    if args.exp not in EXPERIMENTS:
-        print(f'Unknown experiment "{args.exp}". Available: {list(EXPERIMENTS.keys())}')
-        sys.exit(1)
+    Split out of main() so --seeds can call it once per seed. Everything that varies
+    between seeds is already on `config`, so the seeds share nothing but the split.
+    The whole run is teed into <exp_dir>/train.log, so no shell redirection is needed
+    and every seed gets its own log beside its own checkpoints.
+    """
+    with tee_to(config.exp_dir / 'train.log'):
+        _run(config, args, use_tta, use_hd95, device)
 
-    config = EXPERIMENTS[args.exp]
-    if args.epochs:
-        config.num_epochs = args.epochs
-    if args.workers is not None:
-        config.num_workers = args.workers
-    if args.suffixes:
-        config.allowed_suffixes = tuple(s.strip() for s in args.suffixes.split(','))
-    if args.no_wandb:
-        config.use_wandb = False
 
-    use_tta  = not args.no_tta
-    use_hd95 = not args.no_hd95
+def _run(config: Config, args, use_tta: bool, use_hd95: bool, device) -> None:
 
     # Overwrite guard — abort if experiment already has outputs
     exp_dir = config.exp_dir
@@ -375,15 +466,18 @@ def main():
         print(f'       Use --overwrite para sobrescrever.')
         sys.exit(1)
 
-    device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
     print(f'\n{"="*60}')
     print(f'Experiment {config.exp_id}: {config.exp_name}')
+    print(f'Output: {config.exp_dir}  (group={config.group}, seed={config.seed})')
     print(f'Device: {device}')
     print(f'Wavelet: family={config.wavelet_family}, level={config.wavelet_level}, '
           f'skips={config.wavelet_skip_indices}')
     suffix_label = ','.join(f'_{s}' for s in sorted(config.allowed_suffixes)) if config.allowed_suffixes else 'all'
     print(f'TTA: {use_tta} | HD95: {use_hd95} | Suffixes: {suffix_label}')
     print(f'{"="*60}')
+
+    manifest_path = write_run_manifest(config, args, use_tta, use_hd95, device)
+    print(f'Manifest: {manifest_path}')
 
     # Load data
     df = load_dataframe(config)
@@ -522,6 +616,68 @@ def main():
     reporter_final.log_per_model(per_model_test)
     reporter_final.log_froc(froc_out)
     reporter_final.finish()
+
+
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--exp', type=str, default='00',
+                        help='Experiment ID from config.EXPERIMENTS')
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Override num_epochs (e.g. 2 for smoke-test)')
+    parser.add_argument('--folds', type=int, default=None,
+                        help='Run only first N folds from fold-0 (e.g. --folds 1 = fold-0 only, default = all 5)')
+    parser.add_argument('--suffixes', type=str, default=None,
+                        help='Comma-separated filename suffixes to include, e.g. "3" or "1,3" (default: all)')
+    parser.add_argument('--seeds', type=str, default=None,
+                        help='Training seed(s): model init, augmentation, batch order. Names the '
+                             'output directory (.../seed<N>). Comma-separated runs each in turn '
+                             '("42,43,44"), which is how a variance estimate is produced. Omit to '
+                             'use config.seed (42). Never touches the patient split, which is '
+                             'pinned by config.random_seed.')
+    parser.add_argument('--device', type=str, default=None)
+    parser.add_argument('--workers', type=int, default=None,
+                        help='DataLoader num_workers (0 = single-process, safer for debug)')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Overwrite existing experiment outputs without asking')
+    parser.add_argument('--no-wandb', action='store_true',
+                        help='Disable W&B; log to CSV only (<exp_dir>/metrics_fold<N>.csv)')
+    parser.add_argument('--no-tta', action='store_true',
+                        help='Disable test-time augmentation (faster, for smoke tests)')
+    parser.add_argument('--no-hd95', action='store_true',
+                        help='Skip Hausdorff95 in test evaluation (faster, for smoke tests)')
+    parser.add_argument('--eval-only', action='store_true',
+                        help='Skip training; load existing model_best_fold*.pth and only run test eval '
+                             '(computes pixel + lesion-wise detection metrics into test_results.json).')
+    args = parser.parse_args()
+
+    if args.exp not in EXPERIMENTS:
+        print(f'Unknown experiment "{args.exp}". Available: {list(EXPERIMENTS.keys())}')
+        sys.exit(1)
+
+    config = EXPERIMENTS[args.exp]
+    if args.epochs:
+        config.num_epochs = args.epochs
+    if args.workers is not None:
+        config.num_workers = args.workers
+    if args.suffixes:
+        config.allowed_suffixes = tuple(s.strip() for s in args.suffixes.split(','))
+    if args.no_wandb:
+        config.use_wandb = False
+    seeds = ([int(x) for x in args.seeds.split(',')] if args.seeds else [config.seed])
+
+    use_tta  = not args.no_tta
+    use_hd95 = not args.no_hd95
+    device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+
+    for i, seed in enumerate(seeds, 1):
+        config.seed = seed
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        if len(seeds) > 1:
+            print(f'\n{"#"*60}\n# seed {seed}  ({i}/{len(seeds)})\n{"#"*60}')
+        run_experiment(config, args, use_tta, use_hd95, device)
 
 
 if __name__ == '__main__':

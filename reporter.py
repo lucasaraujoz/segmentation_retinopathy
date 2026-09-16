@@ -31,16 +31,21 @@ class Reporter:
 
         self._wandb_active = False
         if config.use_wandb:
-            run_name = f'exp{config.exp_id}_{config.exp_name}{suffix}'
+            # The seed belongs in the name: without it two seeds of the same arm land as
+            # indistinguishable runs, which is precisely the comparison they exist for.
+            run_name = f'{config.exp_id}_{config.exp_name}_s{config.seed}{suffix}'
             try:
                 wandb.init(
                     project=config.wandb_project,
                     name=run_name,
-                    group=f'exp{config.exp_id}_{config.exp_name}',
+                    group=f'{config.exp_id}_{config.exp_name}',   # all seeds and folds of one arm
                     job_type=(f'fold{fold}' if fold is not None else 'test'),
                     config={
                         'exp_id': config.exp_id,
                         'exp_name': config.exp_name,
+                        'group': config.group,
+                        'seed': config.seed,
+                        'classes': list(config.classes),
                         'loss_type': config.loss_type,
                         'encoder': config.encoder_name,
                         'wavelet_family': config.wavelet_family,
