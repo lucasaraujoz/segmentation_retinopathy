@@ -16,8 +16,12 @@ from config import Config
 
 
 _MASK_DIRS = {
-    'HardExudate': 'HardExudate_Masks',
-    'Hemorrhage':  'Hemohedge_Masks',
+    'HardExudate':    'HardExudate_Masks',
+    'Hemorrhage':     'Hemohedge_Masks',
+    'SoftExudate':    'SoftExudate_Masks',
+    'Microaneurysms': 'Microaneurysms_Masks',
+    # IRMA_Masks and Neovascularization_Masks also exist on disk, but only 11 and 14
+    # images carry them at suffix _3 — too few to fold, so they stay unregistered.
 }
 
 
