@@ -4,6 +4,19 @@ wandb
 *.pdf
 plans
 nohup*
-exp_*
 mask_quality
 mask_review
+*.pth
+*.csv
+*.json
+*.npz
+*.png
+
+# Evidence of the dissertation: small, and the only record of what each run was.
+!outputs/**/test_results.json
+!outputs/**/run_config.json
+!outputs/cv_splits*.json
+
+*.log
+# Clone do repo oficial do WFDENet (xuanli01/WFDENet): repo git embutido, nao versionar.
+_legado/replication_2/upstream/
