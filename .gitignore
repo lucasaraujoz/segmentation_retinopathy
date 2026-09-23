@@ -20,3 +20,4 @@ mask_review
 *.log
 # Clone do repo oficial do WFDENet (xuanli01/WFDENet): repo git embutido, nao versionar.
 _legado/replication_2/upstream/
+!outputs/**/size_report.json
