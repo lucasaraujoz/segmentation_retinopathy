@@ -21,6 +21,7 @@ build_transform.
 """
 
 import argparse
+import os
 from pathlib import Path
 from typing import List, Tuple
 
@@ -37,7 +38,10 @@ from replication.idrid import _PAD_FILL  # albumentations 1.x/2.x fill-arg compa
 # OpenCV's thread pool deadlocks inside forked DataLoader workers.
 cv2.setNumThreads(0)
 
-DDR_ROOT = Path('/backup/lucas/ddr/ddr/DDR-dataset/lesion_segmentation')
+# Machine-dependent, so not hardcoded: set DDR_ROOT in the environment, or pass
+# --data-root, to run this on another box without editing the source.
+DDR_ROOT = Path(os.environ.get(
+    'DDR_ROOT', '/backup/lucas/ddr/ddr/DDR-dataset/lesion_segmentation'))
 
 # Same order as IDRiD and as the paper's Table 1/2 columns -- NOT the
 # alphabetical order the label directories happen to be in (EX HE MA SE).

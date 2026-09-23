@@ -35,8 +35,8 @@ from torch.utils.data import ConcatDataset, DataLoader, get_worker_info
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from replication.ddr import DDRDataset
-from replication.idrid import CLASSES, IDRiDDataset
+from replication.ddr import DDR_ROOT, DDRDataset
+from replication.idrid import CLASSES, IDRID_ROOT, IDRiDDataset
 from replication.loss import WFDENetLoss
 from replication.metrics_mmseg import (PAPER_DDR_ABLATED, PAPER_TARGETS,
                                         SegEvaluator, format_comparison)
@@ -309,6 +309,10 @@ def main() -> None:
                         help='Seeds python, numpy, torch, the DataLoader order and '
                              'the albumentations generators (per worker). cuDNN '
                              'kernels stay non-deterministic.')
+    parser.add_argument('--data-root', type=str, default=None,
+                        help='Dataset directory, overriding the DDR_ROOT / IDRID_ROOT '
+                             'environment variables and the built-in defaults. Set this '
+                             '(or the env var) when running on another machine.')
     parser.add_argument('--train-splits', type=str, default='train',
                         help="Comma list of splits to train on, e.g. 'train,valid'. "
                              "DDR only. Anything but 'train' departs from the paper "
@@ -377,9 +381,17 @@ def main() -> None:
         'started_at': datetime.now().isoformat(timespec='seconds'),
     }, indent=2, default=str))
 
+    data_root = Path(args.data_root) if args.data_root else (
+        IDRID_ROOT if args.dataset == 'idrid' else DDR_ROOT)
+    if not data_root.is_dir():
+        parser.error(f'dataset root not found: {data_root}\n'
+                     f'    pass --data-root, or export '
+                     f'{"IDRID_ROOT" if args.dataset == "idrid" else "DDR_ROOT"}=<path>')
+    print(f'data root: {data_root}')
+
     if args.dataset == 'idrid':
-        train_ds = IDRiDDataset('train', photometric=args.photometric)
-        test_ds = IDRiDDataset('test', full_res_eval=args.full_res_eval)
+        train_ds = IDRiDDataset('train', root=data_root, photometric=args.photometric)
+        test_ds = IDRiDDataset('test', root=data_root, full_res_eval=args.full_res_eval)
     else:
         if args.photometric:
             parser.error('--photometric is only wired for idrid')
@@ -388,9 +400,9 @@ def main() -> None:
             parser.error('--train-splits must never include test')
         # is_train=True explicitly: DDRDataset defaults it to (split == 'train'),
         # which would feed 'valid' through the TEST pipeline, without augmentation.
-        parts = [DDRDataset(s, is_train=True) for s in splits]
+        parts = [DDRDataset(s, root=data_root, is_train=True) for s in splits]
         train_ds = parts[0] if len(parts) == 1 else ConcatDataset(parts)
-        test_ds = DDRDataset('test', full_res_eval=args.full_res_eval)
+        test_ds = DDRDataset('test', root=data_root, full_res_eval=args.full_res_eval)
         if splits != ['train']:
             print(f'  ** training on {"+".join(splits)} '
                   f'({" + ".join(str(len(p)) for p in parts)}): NOT the paper protocol **')

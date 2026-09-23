@@ -27,6 +27,7 @@ e1f2f3b so this is a single-variable experiment isolating the detail question.
 """
 
 import argparse
+import os
 from pathlib import Path
 from typing import List, Tuple
 
@@ -43,7 +44,9 @@ from torch.utils.data import Dataset
 # disabling the pool is the cheaper fix and is safe here.
 cv2.setNumThreads(0)
 
-IDRID_ROOT = Path('/home/lucas/datasets/idrid/A. Segmentation')
+# See the DDR_ROOT note in ddr.py: override with IDRID_ROOT or --data-root.
+IDRID_ROOT = Path(os.environ.get(
+    'IDRID_ROOT', '/home/lucas/datasets/idrid/A. Segmentation'))
 
 # Order matters: it is the column order of Table 1 in the paper.
 CLASSES: Tuple[str, ...] = ('EX', 'HE', 'SE', 'MA')
