@@ -21,6 +21,8 @@ Usage:
 import argparse
 import csv
 import json
+import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -29,7 +31,7 @@ import cv2  # noqa: F401  -- must precede torch (CXXABI clash in this env)
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, get_worker_info
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -96,12 +98,94 @@ def _assert_masks_sane(dataset, max_fraction: float = 0.30) -> None:
                 )
 
 
+def _seed_everything(seed: int) -> None:
+    """Seed python, numpy and torch. Before this only torch was seeded, so the
+    augmentation stream (albumentations) was different on every run."""
+    random.seed(seed)
+    np.random.seed(seed % 2**32)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def _seed_transforms(dataset, seed: int) -> None:
+    """albumentations 2.x keeps its OWN generators inside each Compose, seeded
+    from OS entropy unless told otherwise -- seeding numpy/random globally does
+    not reach them. Walk the (possibly concatenated) dataset and seed each."""
+    parts = dataset.datasets if isinstance(dataset, ConcatDataset) else [dataset]
+    for i, ds in enumerate(parts):
+        tf = getattr(ds, 'transform', None)
+        if tf is not None and hasattr(tf, 'set_random_seed'):
+            tf.set_random_seed((seed + 1000 * i) % 2**32)
+
+
+def _seed_worker(worker_id: int) -> None:
+    """worker_init_fn. Top-level so it pickles under the spawn context. torch
+    already derives a distinct, reproducible seed per worker from the loader's
+    generator; propagate it to python, numpy and the transforms."""
+    info = get_worker_info()
+    seed = info.seed % 2**32
+    random.seed(seed)
+    np.random.seed(seed)
+    _seed_transforms(info.dataset, seed)
+
+
+def _atomic_save(obj, path: Path) -> None:
+    """A crash mid-write must not destroy the previous resume point."""
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
+def size_breakdown(scores: dict, classes=CLASSES) -> dict:
+    """Per-image Dice split by GT lesion size (terciles of lesion area over the
+    images that contain the class). Terciles come from the ground truth only,
+    so every run scored on the same test set uses the same cut points.
+
+    Exists because aggregate Dice (pixel-weighted) and per-image Dice
+    (image-weighted) disagreed on DDR HE: HiLo gained on large haemorrhages
+    (88.8% of the pixels) and lost on small ones (a third of the images)."""
+    out = {}
+    for c in classes:
+        dice = np.asarray(scores[c], dtype=float)
+        area = np.asarray(scores[f'area_gt_{c}'], dtype=float)
+        pred = np.asarray(scores[f'area_pred_{c}'], dtype=float)
+        pos, neg = area > 0, area == 0
+        rep = {'n_pos': int(pos.sum()), 'n_neg': int(neg.sum()),
+               'neg_with_fp': int((neg & (pred > 0)).sum())}
+        if pos.sum() >= 3:
+            q1, q2 = np.quantile(area[pos], [1 / 3, 2 / 3])
+            total = area[pos].sum()
+            for name, m in (('small', pos & (area <= q1)),
+                            ('medium', pos & (area > q1) & (area <= q2)),
+                            ('large', pos & (area > q2))):
+                rep[name] = {'n': int(m.sum()),
+                             'pixel_share': float(area[m].sum() / total),
+                             'dice_mean': float(np.nanmean(dice[m]) * 100),
+                             'dice_zero': int((dice[m] == 0).sum())}
+            rep['cuts_px'] = [float(q1), float(q2)]
+        out[c] = rep
+    return out
+
+
+def format_size_breakdown(rep: dict) -> str:
+    lines = ['per-image Dice by GT lesion size (terciles of area, images with the class)',
+             f'{"class":5s} {"size":7s} {"n":>4s} {"%pixels":>8s} {"Dice":>6s} {"zeros":>5s}']
+    for c, r in rep.items():
+        for name in ('small', 'medium', 'large'):
+            if name in r:
+                b = r[name]
+                lines.append(f'{c:5s} {name:7s} {b["n"]:4d} {100 * b["pixel_share"]:7.1f}% '
+                             f'{b["dice_mean"]:6.2f} {b["dice_zero"]:5d}')
+        lines.append(f'{c:5s} {"no GT":7s} {r["n_neg"]:4d}  predicted anyway in {r["neg_with_fp"]}')
+    return '\n'.join(lines)
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False,
              per_image_out: Path = None) -> dict:
     model.eval()
     evaluator = SegEvaluator(CLASSES, keep_probs=keep_probs)
-    filenames = []
+    filenames, area_gt, area_pred = [], [], []
     for batch in loader:
         images = batch['image'].to(device, non_blocking=True)
         masks = batch['mask'].to(device, non_blocking=True)
@@ -123,6 +207,9 @@ def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False,
             masks = masks.cpu()
         evaluator.update(logits, masks)
         filenames.extend(batch['filename'])
+        if per_image_out is not None and logits.shape[0] == 1:
+            area_gt.append(masks.sum(dim=(2, 3))[0].double().cpu().numpy())
+            area_pred.append((logits > 0).sum(dim=(2, 3))[0].double().cpu().numpy())  # sigmoid>0.5
     model.train()
 
     if per_image_out is not None:
@@ -130,7 +217,19 @@ def evaluate(model, loader, device, keep_probs: bool = True, amp: bool = False,
         # Same test_scores.npz convention the FGADR series uses.
         per_img = evaluator.per_image_dice()
         if per_img:
-            np.savez(per_image_out, filenames=np.array(filenames), **per_img)
+            extra = {}
+            if len(area_gt) == len(filenames):
+                ag, ap = np.stack(area_gt), np.stack(area_pred)
+                for c, name in enumerate(CLASSES):
+                    extra[f'area_gt_{name}'] = ag[:, c]
+                    extra[f'area_pred_{name}'] = ap[:, c]
+            # Accumulated PR sweep behind AUPR, [thresholds, classes]. Lets an
+            # AUPR swing be inspected threshold by threshold (e.g. DDR SE -20).
+            extra['pr_thresholds'] = np.asarray(evaluator.threshs)
+            extra['pr_tp'] = evaluator.tp.numpy()
+            extra['pr_p'] = evaluator.p.numpy()
+            extra['pr_fn'] = evaluator.fn.numpy()
+            np.savez(per_image_out, filenames=np.array(filenames), **per_img, **extra)
 
     return evaluator.compute()
 
@@ -206,7 +305,20 @@ def main() -> None:
                         help='smp encoder for --model unet*; ignored for wfdenet.')
     parser.add_argument('--eval-only', action='store_true')
     parser.add_argument('--ckpt', type=str, default=None)
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Seeds python, numpy, torch, the DataLoader order and '
+                             'the albumentations generators (per worker). cuDNN '
+                             'kernels stay non-deterministic.')
+    parser.add_argument('--train-splits', type=str, default='train',
+                        help="Comma list of splits to train on, e.g. 'train,valid'. "
+                             "DDR only. Anything but 'train' departs from the paper "
+                             'protocol, so numbers stop being comparable to Table 2.')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to a last.pth written by a previous run of the SAME '
+                             'configuration; continues from its iteration.')
+    parser.add_argument('--resume-interval', type=int, default=2000,
+                        help='Iterations between overwrites of out-dir/last.pth '
+                             '(model + optimizer + iter). 0 disables.')
     args = parser.parse_args()
 
     spec = DATASETS[args.dataset]
@@ -226,10 +338,23 @@ def main() -> None:
         if fully_ablated:
             ref_label += '  [!] ablated run vs FULL-model targets'
 
-    torch.manual_seed(args.seed)
+    _seed_everything(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    resume_state = None
+    if args.resume:
+        resume_state = torch.load(args.resume, map_location='cpu', weights_only=False)
+        # Refuse to continue a run under a different recipe: the result would
+        # belong to neither configuration.
+        must_match = ('dataset', 'model', 'encoder', 'iters', 'batch_size', 'accum', 'lr',
+                      'min_lr', 'amp', 'train_splits', 'seed', 'no_pretrained')
+        saved = resume_state.get('args', {})
+        diff = {k: (saved.get(k), getattr(args, k)) for k in must_match
+                if k in saved and saved.get(k) != getattr(args, k)}
+        if diff:
+            parser.error(f'--resume config mismatch (saved, now): {diff}')
 
     # Run manifest. Every earlier run in outputs/_replicacao had to have its
     # protocol reconstructed from train_log.csv and directory mtimes, because
@@ -241,7 +366,9 @@ def main() -> None:
             return subprocess.check_output(['git', *a], stderr=subprocess.DEVNULL).decode().strip()
         except Exception:
             return default
-    (out_dir / 'run_config.json').write_text(json.dumps({
+    manifest = 'run_config.json' if resume_state is None else \
+        f'run_config_resume_{resume_state["iter"]}.json'
+    (out_dir / manifest).write_text(json.dumps({
         'argv': sys.argv,
         'args': vars(args),
         'git_commit': _git('rev-parse', 'HEAD'),
@@ -256,8 +383,19 @@ def main() -> None:
     else:
         if args.photometric:
             parser.error('--photometric is only wired for idrid')
-        train_ds = DDRDataset('train')
+        splits = [s.strip() for s in args.train_splits.split(',') if s.strip()]
+        if 'test' in splits:
+            parser.error('--train-splits must never include test')
+        # is_train=True explicitly: DDRDataset defaults it to (split == 'train'),
+        # which would feed 'valid' through the TEST pipeline, without augmentation.
+        parts = [DDRDataset(s, is_train=True) for s in splits]
+        train_ds = parts[0] if len(parts) == 1 else ConcatDataset(parts)
         test_ds = DDRDataset('test', full_res_eval=args.full_res_eval)
+        if splits != ['train']:
+            print(f'  ** training on {"+".join(splits)} '
+                  f'({" + ".join(str(len(p)) for p in parts)}): NOT the paper protocol **')
+    if args.dataset == 'idrid' and args.train_splits != 'train':
+        parser.error('--train-splits is only wired for ddr')
     print(f'{args.dataset}: {len(train_ds)} train / {len(test_ds)} test '
           f'| {spec["size"]} | classes {CLASSES}')
     if args.photometric:
@@ -327,11 +465,24 @@ def main() -> None:
                            per_image_out=out_dir / 'test_scores.npz')
         print('\n' + format_comparison(results, paper_ref, ref_label))
         (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
+        scores = dict(np.load(out_dir / 'test_scores.npz', allow_pickle=True))
+        if all(f'area_gt_{c}' in scores for c in CLASSES):
+            rep = size_breakdown(scores)
+            print('\n' + format_size_breakdown(rep))
+            (out_dir / 'size_report.json').write_text(json.dumps(rep, indent=2))
         return
 
+    start_iter = int(resume_state['iter']) if resume_state is not None else 0
+    # The loader order is seeded too. On resume the stream is re-seeded with
+    # seed+start_iter: training continues exactly from the saved weights and
+    # optimizer, but the sample order after the resume point is not the one the
+    # uninterrupted run would have drawn.
+    loader_gen = torch.Generator().manual_seed(args.seed + start_iter)
+    _seed_transforms(train_ds, args.seed + start_iter)   # workers=0 path
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True,
-        persistent_workers=args.workers > 0, **loader_kwargs,
+        persistent_workers=args.workers > 0, generator=loader_gen,
+        worker_init_fn=_seed_worker if args.workers > 0 else None, **loader_kwargs,
     )
     batches = infinite_loader(train_loader)
 
@@ -341,9 +492,15 @@ def main() -> None:
         weight_decay=WEIGHT_DECAY,
     )
 
+    if resume_state is not None:
+        model.load_state_dict(resume_state['model'])
+        optimizer.load_state_dict(resume_state['optimizer'])
+        print(f'resumed from {args.resume} at iter {start_iter}')
+
     metrics_csv = out_dir / 'train_log.csv'
-    with open(metrics_csv, 'w', newline='') as f:
-        csv.writer(f).writerow(['iter', 'lr', 'loss', 'loss_main', 'loss_aux0', 'loss_aux1'])
+    if resume_state is None or not metrics_csv.exists():
+        with open(metrics_csv, 'w', newline='') as f:
+            csv.writer(f).writerow(['iter', 'lr', 'loss', 'loss_main', 'loss_aux0', 'loss_aux1'])
 
     model.train()
     running, t0 = 0.0, time.time()
@@ -353,7 +510,7 @@ def main() -> None:
           f'{" bf16-amp" if args.amp else ""}, '
           f'SGD lr={args.lr} poly^{POLY_POWER} min_lr={args.min_lr}\n')
 
-    for it in range(1, args.iters + 1):
+    for it in range(start_iter + 1, args.iters + 1):
         # One iteration == one optimizer step == one point on the poly LR curve,
         # regardless of accumulation. accum micro-batches make up the effective
         # batch, so the schedule stays identical to the paper's 40k iters.
@@ -405,6 +562,11 @@ def main() -> None:
             torch.save({'iter': it, 'model': model.state_dict()},
                        out_dir / f'iter_{it}.pth')
 
+        if args.resume_interval and it % args.resume_interval == 0 and it < args.iters:
+            _atomic_save({'iter': it, 'model': model.state_dict(),
+                          'optimizer': optimizer.state_dict(), 'args': vars(args)},
+                         out_dir / 'last.pth')
+
     final_ckpt = out_dir / 'final.pth'
     torch.save({'iter': args.iters, 'model': model.state_dict()}, final_ckpt)
 
@@ -431,6 +593,11 @@ def main() -> None:
 
     print(format_comparison(results, paper_ref, ref_label))
     (out_dir / 'test_results.json').write_text(json.dumps(results, indent=2))
+    scores = dict(np.load(out_dir / 'test_scores.npz', allow_pickle=True))
+    if all(f'area_gt_{c}' in scores for c in CLASSES):
+        rep = size_breakdown(scores)
+        print('\n' + format_size_breakdown(rep))
+        (out_dir / 'size_report.json').write_text(json.dumps(rep, indent=2))
     print(f'\nsaved {final_ckpt}, test_results.json and test_scores.npz in {out_dir}')
 
 
