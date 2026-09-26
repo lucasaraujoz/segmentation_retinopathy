@@ -1,0 +1,110 @@
+{
+  "EX": {
+    "n_pos": 171,
+    "n_neg": 54,
+    "neg_with_fp": 21,
+    "small": {
+      "n": 57,
+      "pixel_share": 0.01556767949035344,
+      "dice_mean": 47.448838205807455,
+      "dice_zero": 5
+    },
+    "medium": {
+      "n": 57,
+      "pixel_share": 0.07951233009464524,
+      "dice_mean": 64.07007546929465,
+      "dice_zero": 0
+    },
+    "large": {
+      "n": 57,
+      "pixel_share": 0.9049199904150013,
+      "dice_mean": 61.09617661901892,
+      "dice_zero": 0
+    },
+    "cuts_px": [
+      2348.0,
+      9596.0
+    ]
+  },
+  "HE": {
+    "n_pos": 194,
+    "n_neg": 31,
+    "neg_with_fp": 13,
+    "small": {
+      "n": 65,
+      "pixel_share": 0.016878814192552546,
+      "dice_mean": 47.02780960047192,
+      "dice_zero": 6
+    },
+    "medium": {
+      "n": 64,
+      "pixel_share": 0.09515890411373774,
+      "dice_mean": 42.956137399544915,
+      "dice_zero": 2
+    },
+    "large": {
+      "n": 65,
+      "pixel_share": 0.8879622816937097,
+      "dice_mean": 42.08202200581394,
+      "dice_zero": 0
+    },
+    "cuts_px": [
+      4123.333333333333,
+      16947.99999999999
+    ]
+  },
+  "SE": {
+    "n_pos": 42,
+    "n_neg": 183,
+    "neg_with_fp": 78,
+    "small": {
+      "n": 14,
+      "pixel_share": 0.059666079662315664,
+      "dice_mean": 29.49855783257755,
+      "dice_zero": 7
+    },
+    "medium": {
+      "n": 14,
+      "pixel_share": 0.19707886918764872,
+      "dice_mean": 45.47539243879751,
+      "dice_zero": 4
+    },
+    "large": {
+      "n": 14,
+      "pixel_share": 0.7432550511500357,
+      "dice_mean": 65.18489650912308,
+      "dice_zero": 1
+    },
+    "cuts_px": [
+      1921.3333333333333,
+      7010.666666666665
+    ]
+  },
+  "MA": {
+    "n_pos": 124,
+    "n_neg": 101,
+    "neg_with_fp": 82,
+    "small": {
+      "n": 42,
+      "pixel_share": 0.035027003724238684,
+      "dice_mean": 25.339034953028754,
+      "dice_zero": 14
+    },
+    "medium": {
+      "n": 41,
+      "pixel_share": 0.15559773432167362,
+      "dice_mean": 35.88015119730232,
+      "dice_zero": 1
+    },
+    "large": {
+      "n": 41,
+      "pixel_share": 0.8093752619540877,
+      "dice_mean": 37.30014321936477,
+      "dice_zero": 0
+    },
+    "cuts_px": [
+      256.0,
+      1064.0
+    ]
+  }
+}
